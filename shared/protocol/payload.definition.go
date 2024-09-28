@@ -1,7 +1,6 @@
 package protocol
 
 import (
-	"adb-remote.maci.team/shared/utils"
 	"fmt"
 	"hash/crc32"
 )
@@ -25,24 +24,19 @@ func (message *TransporterMessage) GetErrorPayload() (*TransporterMessagePayload
 		ErrorCode:    errorCode,
 		ErrorMessage: errorMessage,
 	}, nil
-	errorCode := ByteOrder.Uint32(message.payloadBuffer[:4])
-	messageLength := ByteOrder.Uint32(message.payloadBuffer[4:8])
-	errorMessage := string(message.payloadBuffer[8 : 8+messageLength])
-	data := new(TransporterMessagePayloadError)
-	data.ErrorCode = errorCode
-	data.ErrorMessage = errorMessage
-	return data
 }
 
-func (message *TransporterMessage) SetErrorPayload(data *TransporterMessagePayloadError) {
-	targetBuffer := message.payloadBuffer[:4]
-	ByteOrder.PutUint32(targetBuffer, data.ErrorCode)
-	errorMessage := []byte(data.ErrorMessage)
-	ByteOrder.PutUint32(targetBuffer[4:8], uint32(len(errorMessage)))
-	copy(targetBuffer[8:], errorMessage)
-	payloadLength := 8 + len(errorMessage)
-	ByteOrder.PutUint32(message.payloadCrc32Buffer, crc32.ChecksumIEEE(message.payloadBuffer[:payloadLength]))
-	ByteOrder.PutUint32(message.payloadLengthBuffer, uint32(payloadLength))
+func (message *TransporterMessage) SetErrorPayload(data *TransporterMessagePayloadError) error {
+	offset, err := message.writeInt(0, data.ErrorCode)
+	if err != nil {
+		return err
+	}
+	payloadLength, err := message.writeString(offset, data.ErrorMessage)
+	if err != nil {
+		return err
+	}
+	message.updatePayloadMetadata(payloadLength)
+	return nil
 }
 
 //endregion
@@ -54,20 +48,22 @@ type TransporterMessagePayloadConnect struct {
 }
 
 func (message *TransporterMessage) GetPayloadConnect() (*TransporterMessagePayloadConnect, error) {
-	payloadLength := message.PayloadLength()
-	if err := utils.EnsureIntLength(int(payloadLength)); err != nil {
+	_, protocolVersion, err := message.readInt(0)
+	if err != nil {
 		return nil, err
 	}
-	data := new(TransporterMessagePayloadConnect)
-	data.ProtocolVersion = ByteOrder.Uint32(message.payloadBuffer[:4])
-	return data, nil
+	return &TransporterMessagePayloadConnect{
+		ProtocolVersion: uint32(protocolVersion),
+	}, nil
 }
 
-func (message *TransporterMessage) SetPayloadConnect(data *TransporterMessagePayloadConnect) {
-	targetBuffer := message.payloadBuffer[:4]
-	ByteOrder.PutUint32(targetBuffer, data.ProtocolVersion)
-	ByteOrder.PutUint32(message.payloadCrc32Buffer, crc32.ChecksumIEEE(targetBuffer))
-	ByteOrder.PutUint32(message.payloadLengthBuffer, uint32(len(targetBuffer)))
+func (message *TransporterMessage) SetPayloadConnect(data *TransporterMessagePayloadConnect) error {
+	payloadLength, err := message.writeInt(0, int(data.ProtocolVersion))
+	if err != nil {
+		return err
+	}
+	message.updatePayloadMetadata(payloadLength)
+	return nil
 }
 
 //endregion
@@ -87,10 +83,11 @@ func (message *TransporterMessage) GetPayloadConnectResponse() (*TransporterMess
 	}, nil
 }
 func (message *TransporterMessage) SetPayloadConnectResponse(data *TransporterMessagePayloadConnectResponse) error {
-	_, err := message.writeString(0, data.ClientId)
+	payloadLength, err := message.writeString(0, data.ClientId)
 	if err != nil {
 		return err
 	}
+	message.updatePayloadMetadata(payloadLength)
 	return nil
 }
 
@@ -112,10 +109,11 @@ func (message *TransporterMessage) GetPayloadCreateRoomResponse() (*TransporterM
 }
 
 func (message *TransporterMessage) SetPayloadCreateRoomResponse(data *TransporterMessagePayloadCreateRoomResponse) error {
-	_, err := message.writeString(0, data.RoomId)
+	payloadLength, err := message.writeString(0, data.RoomId)
 	if err != nil {
 		return err
 	}
+	message.updatePayloadMetadata(payloadLength)
 	return nil
 }
 
@@ -137,10 +135,11 @@ func (message *TransporterMessage) GetPayloadConnectRoom() (*TransporterMessageP
 }
 
 func (message *TransporterMessage) SetPayloadConnectRoom(data *TransporterMessagePayloadConnectRoom) error {
-	_, err := message.writeString(0, data.RoomId)
+	payloadLength, err := message.writeString(0, data.RoomId)
 	if err != nil {
 		return err
 	}
+	message.updatePayloadMetadata(payloadLength)
 	return nil
 }
 
@@ -162,10 +161,11 @@ func (message *TransporterMessage) GetPayloadConnectRoomResult() (*TransporterMe
 }
 
 func (message *TransporterMessage) SetPayloadConnectRoomResult(data *TransporterMessagePayloadConnectRoomResult) error {
-	_, err := message.writeInt(0, data.Accepted)
+	payloadLength, err := message.writeInt(0, data.Accepted)
 	if err != nil {
 		return err
 	}
+	message.updatePayloadMetadata(payloadLength)
 	return nil
 }
 
@@ -217,6 +217,12 @@ func (message *TransporterMessage) readString(offset uint32) (uint32, string, er
 	offset += lengthTypeSize
 	value := string(message.payloadBuffer[offset : offset+length])
 	return newOffset, value, nil
+}
+
+func (message *TransporterMessage) updatePayloadMetadata(payloadLength uint32) {
+	targetBuffer := message.payloadBuffer[:payloadLength]
+	ByteOrder.PutUint32(message.payloadLengthBuffer, payloadLength)
+	ByteOrder.PutUint32(message.payloadCrc32Buffer, crc32.ChecksumIEEE(targetBuffer))
 }
 
 //endregion
