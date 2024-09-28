@@ -1,13 +1,13 @@
 package main
 
 import (
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"strconv"
 
 	models "adb-remote.maci.team/client/models"
 )
@@ -53,25 +53,24 @@ func (self *AdbHost) executeCommand(command string) (int, error) {
 }
 
 func (self *AdbHost) DeviceList() ([]models.Device, error) {
-	result, err := self.executeCommand("host:devices")
+	length, err := self.executeCommand("host:devices")
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println(hex.Dump(result))
+	fmt.Println(hex.Dump(self.messageBuffer[:length]))
 	deviceList := make([]models.Device, 0)
 	var lastIndex = 0
-	var resultLength = len(result)
-	for lastIndex < resultLength {
+	for lastIndex < length {
 		deviceIdLastIndex := lastIndex
-		for deviceIdLastIndex < resultLength && result[deviceIdLastIndex] != 0x09 {
+		for deviceIdLastIndex < length && self.messageBuffer[deviceIdLastIndex] != 0x09 {
 			deviceIdLastIndex++
 		}
 		deviceTypeLastIndex := deviceIdLastIndex + 1
-		for deviceTypeLastIndex < resultLength && result[deviceTypeLastIndex] != 0x0a {
+		for deviceTypeLastIndex < length && self.messageBuffer[deviceTypeLastIndex] != 0x0a {
 			deviceTypeLastIndex++
 		}
-		deviceId := string(result[lastIndex:deviceIdLastIndex])
-		deviceType := string(result[deviceIdLastIndex+1 : deviceTypeLastIndex])
+		deviceId := string(self.messageBuffer[lastIndex:deviceIdLastIndex])
+		deviceType := string(self.messageBuffer[deviceIdLastIndex+1 : deviceTypeLastIndex])
 		deviceList = append(deviceList, models.Device{
 			Id:   deviceId,
 			Type: deviceType,
@@ -87,7 +86,15 @@ func (self *AdbHost) Transport(targetSerial string) (*net.Conn, error) {
 		return nil, err
 	}
 	command := fmt.Sprintf("host:transport:%s", targetSerial)
-	conn.Write([]byte(fmt.Sprintf(smartSocketMessageFormat, len(command), command)))
+	length, err := conn.Write([]byte(fmt.Sprintf(smartSocketMessageFormat, len(command), command)))
+	logger.Println("Write return value: ", length)
+	if err != nil {
+		return nil, err
+	}
+	if err := self.checkResult(&conn); err != nil {
+		return nil, err
+	}
+	return &conn, nil
 }
 
 func (self *AdbHost) checkResult(connection *net.Conn) error {
@@ -115,12 +122,15 @@ func (self *AdbHost) readResponse(connection *net.Conn) (int, error) {
 	if err != nil && err != io.EOF {
 		return 0, err
 	}
-	ensureBufferFull(&self.messageIntBuffer, length)
-	length, err = hex.Decode(self.messageBuffer[4:], self.messageBuffer[:4])
+	if err := ensureBufferFull(&self.messageIntBuffer, length); err != nil {
+		return 0, err
+	}
+	responseLength, err := strconv.ParseInt(string(self.messageIntBuffer), 16, 0)
+	logger.Printf("Response length: %d\n", responseLength)
 	if err != nil {
 		return 0, err
 	}
-	responseLength := binary.LittleEndian.Uint32(self.messageBuffer[4:8])
+	logger.Println("Response length: ", responseLength)
 	if int(responseLength) > len(self.messageBuffer) {
 		return 0, errors.New("Invalid response length, the target buffer too small to handle the responses")
 	}

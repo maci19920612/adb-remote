@@ -11,8 +11,8 @@ import (
 
 const (
 	magicConstant    = 0xffffffff
-	maxPayloadLength = 4 * 1024
-	HeaderSize       = 6 * 4
+	maxPayloadLength = 0x1000
+	HeaderSize       = 0x0018
 )
 
 const (
