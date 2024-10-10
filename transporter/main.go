@@ -1,7 +1,19 @@
 package main
 
-import "fmt"
+import (
+	"log"
+)
+
+type TestJson struct {
+	ServerType    string `json:serverType`
+	ServerAddress string `json:serverAddress`
+}
 
 func main() {
-	fmt.Println("Hello World!")
+
+	log.SetFlags(log.Ldate | log.Lshortfile | log.Ltime)
+	StartServer(ServerConfiguration{
+		ServerType:    "tcp",
+		ServerAddress: "0.0.0.0:1234",
+	})
 }

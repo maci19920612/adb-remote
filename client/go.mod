@@ -4,8 +4,6 @@ go 1.22.4
 
 replace adb-remote.maci.team/shared => ../shared
 
-require github.com/rivo/tview v0.0.0-20240818110301-fd649dbf1223
-
 require (
 	github.com/gdamore/encoding v1.0.0 // indirect
 	github.com/gdamore/tcell/v2 v2.7.1 // indirect

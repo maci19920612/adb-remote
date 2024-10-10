@@ -1,9 +1,10 @@
 package protocol
 
 import (
-	"adb-remote.maci.team/shared"
 	"adb-remote.maci.team/shared/utils"
 	"encoding/binary"
+	"net"
+	"sync"
 )
 
 var ByteOrder binary.ByteOrder = binary.LittleEndian
@@ -15,9 +16,10 @@ type TransporterMessage struct {
 	payloadBuffer       []byte
 	headerBuffer        []byte
 	messageBuffer       []byte
+	mutex               *sync.Mutex
 }
 
-func CreateMessage() *TransporterMessage {
+func CreateTransporterMessage() *TransporterMessage {
 	messageBuffer := make([]byte, MaxPayloadSize+4*3)
 	return &TransporterMessage{
 		commandBuffer:       messageBuffer[0:4],
@@ -26,6 +28,7 @@ func CreateMessage() *TransporterMessage {
 		payloadBuffer:       messageBuffer[12:],
 		headerBuffer:        messageBuffer[0:12],
 		messageBuffer:       messageBuffer,
+		mutex:               new(sync.Mutex),
 	}
 }
 
@@ -39,7 +42,23 @@ func (message *TransporterMessage) PayloadCRC32() uint32 {
 	return ByteOrder.Uint32(message.payloadCrc32Buffer)
 }
 
-func (message *TransporterMessage) Read(reader *shared.TransportRead) error {
+func (message *TransporterMessage) SetDirectCommand(command uint32) {
+	message.mutex.Lock()
+	defer message.mutex.Unlock()
+	ByteOrder.PutUint32(message.commandBuffer, command)
+}
+
+func (message *TransporterMessage) SetResponseCommand(command uint32) {
+	message.SetDirectCommand(command | CommandResponseMask)
+}
+
+func (message *TransporterMessage) SetErrorResponseCommand(command uint32) {
+	message.SetDirectCommand(command | CommandErrorResponseMask)
+}
+
+func (message *TransporterMessage) Read(reader *net.Conn) error {
+	message.mutex.Lock()
+	defer message.mutex.Unlock()
 	length, err := (*reader).Read(message.headerBuffer)
 	if err != nil {
 		return err
@@ -60,7 +79,9 @@ func (message *TransporterMessage) Read(reader *shared.TransportRead) error {
 	return nil
 }
 
-func (message *TransporterMessage) Write(writer *shared.TransportWrite) error {
+func (message *TransporterMessage) Write(writer *net.Conn) error {
+	message.mutex.Lock()
+	defer message.mutex.Unlock()
 	length, err := (*writer).Write(message.headerBuffer)
 	if err != nil {
 		return err

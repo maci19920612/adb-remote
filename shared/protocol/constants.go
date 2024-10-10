@@ -15,3 +15,7 @@ const (
 
 const CommandResponseMask uint32 = 0x1000
 const CommandErrorResponseMask uint32 = 0x2000
+
+const (
+	ErrorProtocolNotSupported int = 0x0001
+)
