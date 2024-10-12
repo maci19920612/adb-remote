@@ -14,7 +14,7 @@ type TransportMessagePool struct {
 	length    int
 }
 
-func CreateTransportMessagePool() *TransportMessagePool {
+func CreateTransporterMessagePool() *TransportMessagePool {
 	return &TransportMessagePool{
 		mutex:     new(sync.Mutex),
 		container: make([]*protocol.TransporterMessage, poolSizeInitial),

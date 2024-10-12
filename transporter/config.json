@@ -1,0 +1,4 @@
+{
+  "transporterAddress": "0.0.0.0:1234",
+  "transporterType": "tcp"
+}

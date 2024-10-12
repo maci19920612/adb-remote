@@ -4,4 +4,7 @@ go 1.22.4
 
 replace adb-remote.maci.team/shared => ../shared
 
-require adb-remote.maci.team/shared v0.0.0-00010101000000-000000000000 // indirect
+require (
+	adb-remote.maci.team/shared v0.0.0-00010101000000-000000000000 // indirect
+	github.com/golobby/container/v3 v3.3.2 // indirect
+)
