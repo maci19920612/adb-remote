@@ -121,24 +121,28 @@ func (message *TransporterMessage) SetPayloadCreateRoomResponse(data *Transporte
 
 // region Connect to room payload
 type TransporterMessagePayloadConnectRoom struct {
-	RoomId string
+	RoomId   string
+	ClientId string
 }
 
 func (message *TransporterMessage) GetPayloadConnectRoom() (*TransporterMessagePayloadConnectRoom, error) {
-	_, roomId, err := message.readString(0)
+	offset, roomId, err := message.readString(0)
 	if err != nil {
 		return nil, err
 	}
+	_, clientId, err := message.readString(offset)
 	return &TransporterMessagePayloadConnectRoom{
-		RoomId: roomId,
+		RoomId:   roomId,
+		ClientId: clientId,
 	}, nil
 }
 
 func (message *TransporterMessage) SetPayloadConnectRoom(data *TransporterMessagePayloadConnectRoom) error {
-	payloadLength, err := message.writeString(0, data.RoomId)
+	offset, err := message.writeString(0, data.RoomId)
 	if err != nil {
 		return err
 	}
+	payloadLength, err := message.writeString(offset, data.ClientId)
 	message.updatePayloadMetadata(payloadLength)
 	return nil
 }

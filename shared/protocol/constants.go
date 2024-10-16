@@ -17,5 +17,10 @@ const CommandResponseMask uint32 = 0x1000
 const CommandErrorResponseMask uint32 = 0x2000
 
 const (
+	ErrorUnknown              int = 0x0001
 	ErrorProtocolNotSupported int = 0x0001
+	ErrorAlreadyInRoom        int = 0x0002
+	ErrorRoomNotFound         int = 0x0003
+	ErrorFull                 int = 0x0004
+	ErrorNoParticipant        int = 0x0005
 )
