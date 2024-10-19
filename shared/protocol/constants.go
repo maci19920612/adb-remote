@@ -23,4 +23,5 @@ const (
 	ErrorRoomNotFound         int = 0x0003
 	ErrorFull                 int = 0x0004
 	ErrorNoParticipant        int = 0x0005
+	ErrorInvalidPayload       int = 0x0006
 )

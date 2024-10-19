@@ -1,7 +1,6 @@
 package protocol
 
 import (
-	"adb-remote.maci.team/shared/utils"
 	"encoding/binary"
 	"net"
 )
@@ -56,7 +55,7 @@ func (message *TransporterMessage) Read(reader *net.Conn) error {
 	if err != nil {
 		return err
 	}
-	if err := utils.EnsureLength(len(message.headerBuffer), length); err != nil {
+	if err := EnsureLength(len(message.headerBuffer), length); err != nil {
 		return err
 	}
 	payloadLength := message.PayloadLength()
@@ -65,7 +64,7 @@ func (message *TransporterMessage) Read(reader *net.Conn) error {
 		if err != nil {
 			return err
 		}
-		if err := utils.EnsureLength(int(payloadLength), length); err != nil {
+		if err := EnsureLength(int(payloadLength), length); err != nil {
 			return err
 		}
 	}
@@ -77,7 +76,7 @@ func (message *TransporterMessage) Write(writer *net.Conn) error {
 	if err != nil {
 		return err
 	}
-	if err := utils.EnsureLength(len(message.headerBuffer), length); err != nil {
+	if err := EnsureLength(len(message.headerBuffer), length); err != nil {
 		return err
 	}
 	payloadLength := message.PayloadLength()
@@ -86,7 +85,7 @@ func (message *TransporterMessage) Write(writer *net.Conn) error {
 		if err != nil {
 			return err
 		}
-		if err := utils.EnsureLength(int(payloadLength), length); err != nil {
+		if err := EnsureLength(int(payloadLength), length); err != nil {
 			return err
 		}
 	}

@@ -4,30 +4,45 @@ import (
 	"adb-remote.maci.team/shared/protocol"
 	"adb-remote.maci.team/transporter/utils"
 	"fmt"
+	"io"
 	"log"
+	"log/slog"
 	"net"
 )
 
 type ClientConnection struct {
-	connection *net.Conn
-	owner      *ConnectionManager
-	clientId   string
+	connection  *net.Conn
+	owner       *ConnectionManager
+	clientId    string
+	isConnected bool
+}
+
+func (cc *ClientConnection) internalClose() {
+	if !cc.isConnected {
+		return
+	}
+	cc.isConnected = false
+	cc.owner.internalCloseClient(cc)
 }
 
 func (cc *ClientConnection) GetClientId() string {
 	return cc.clientId
 }
 
-func (clientConnection *ClientConnection) start() {
-	logger := clientConnection.owner.logger
-	messagePool := clientConnection.owner.transporterMessagePool
-	logger.Info("%p (-): Client connection started")
+func (cc *ClientConnection) start() {
+	connectionManager := cc.owner
+	logger := cc.owner.logger
+	messagePool := cc.owner.transporterMessagePool
+	logger.Info("Testing the log framework", []slog.Attr{
+		slog.String("client", fmt.Sprintf("%p", cc)),
+	})
+	logger.Info(fmt.Sprintf("%p (-): Client connection started", cc))
 	go func() {
 		connectTransporterMessage := messagePool.Obtain()
-		err := connectTransporterMessage.Read(clientConnection.connection)
+		err := connectTransporterMessage.Read(cc.connection)
 		if err != nil {
-			logger.Error("%p (-): Error during the transporter message reading: %s", clientConnection, err)
-			clientConnection.internalClose()
+			logger.Error(fmt.Sprintf("%p (-): Error during the transporter message reading: %s", cc, err))
+			cc.internalClose()
 			messagePool.Release(connectTransporterMessage)
 			return
 		}
@@ -35,44 +50,77 @@ func (clientConnection *ClientConnection) start() {
 		case protocol.CommandConnect:
 			payload, err := connectTransporterMessage.GetPayloadConnect()
 			if err != nil {
-				logger.Error("%p (-): Error during the connect payload reading: %s", clientConnection, err)
-				clientConnection.internalClose()
+				logger.Error(fmt.Sprintf("%p (-): Error during the connect payload reading: %s", cc, err))
+				cc.internalClose()
 				messagePool.Release(connectTransporterMessage)
 				return
 			}
 			//ERROR: Protocol version not supported
 			if payload.ProtocolVersion != protocol.ProtocolVersion {
-				logger.Error("%p (-): Protocol version mismatch: server=%d, client=%d", clientConnection, protocol.ProtocolVersion, payload.ProtocolVersion)
-				clientConnection.handleProtocolMismatchError(payload.ProtocolVersion)
+				logger.Error(fmt.Sprintf("%p (-): Protocol version mismatch: server=%d, client=%d", cc, protocol.ProtocolVersion, payload.ProtocolVersion))
+				cc.handleProtocolMismatchError(payload.ProtocolVersion)
 				messagePool.Release(connectTransporterMessage)
 				return
 			}
-			logger.Info("%p (-): A client started the connection process", clientConnection)
+			logger.Info(fmt.Sprintf("%p (-): A client started the connection process", cc))
 			clientId := utils.GenerateClientId()
-			logger.Info("%p (%s): Client ID generated:", clientConnection, clientId)
-			clientConnection.clientId = clientId
+			logger.Info(fmt.Sprintf("%p (%s): Client ID generated:", cc, clientId))
+			cc.clientId = clientId
 			connectTransporterMessage.SetResponseCommand(protocol.CommandConnect)
 			err = connectTransporterMessage.SetPayloadConnectResponse(&protocol.TransporterMessagePayloadConnectResponse{
 				ClientId: clientId,
 			})
 			if err != nil {
-				logger.Error("%p (%s): Error during the connect response payload creation: %s", clientConnection, clientId, err)
+				logger.Error(fmt.Sprintf("%p (%s): Error during the connect response payload creation: %s", cc, clientId, err))
 				messagePool.Release(connectTransporterMessage)
-				clientConnection.internalClose()
+				cc.internalClose()
 				return
 			}
-			err = connectTransporterMessage.Write(clientConnection.connection)
+			err = connectTransporterMessage.Write(cc.connection)
 			if err != nil {
-				logger.Error("%p (%s): Error during the connect response payload sending: %s", clientConnection, clientId, err)
+				logger.Error(fmt.Sprintf("%p (%s): Error during the connect response payload sending: %s", cc, clientId, err))
 				messagePool.Release(connectTransporterMessage)
-				clientConnection.internalClose()
+				cc.internalClose()
 			}
-			logger.Info("%p (%s): Client connection established", clientConnection, clientId)
-
-			//TODO: Register the client in the room controller
-
+			logger.Info(fmt.Sprintf("%p (%s): Client connection established", cc, clientId))
+			messagePool.Release(connectTransporterMessage)
 		case protocol.CommandReconnect:
-			//TODO: This feature it not implemented yet!
+			logger.Info(fmt.Sprintf("%p (-): This feature is not implemented yet"))
+			cc.internalClose()
+		default:
+			logger.Error(fmt.Sprintf("%p (-): Client tried an invalid handshake, close the connection quietly", cc))
+			cc.internalClose()
+			return
+		}
+
+		for {
+			logger.Info(fmt.Sprintf("%p (%s): Waiting for message", cc, cc.GetClientId()))
+			message := messagePool.Obtain()
+			err := message.Read(cc.connection)
+			logger.Info(fmt.Sprintf("%p (%s): Message received from the client: %x", cc, cc.GetClientId(), message.Command()))
+			if err != nil {
+				logger.Error(fmt.Sprintf("%p (%s): Invalid message read from the network: %s", cc, cc.GetClientId(), err))
+				if err != io.EOF {
+					message.SetErrorResponseCommand(message.Command())
+					if err := message.SetErrorPayload(&protocol.TransporterMessagePayloadError{
+						ErrorCode:    protocol.ErrorUnknown,
+						ErrorMessage: "Invalid message read from the network, close the connection",
+					}); err == nil {
+						_ = message.Write(cc.connection)
+						cc.internalClose()
+						return
+					}
+				} else {
+					cc.internalClose()
+					return
+				}
+			}
+			logger.Info(fmt.Sprintf("%p (%s): Message processed, sending in the ClientMessageChannel", cc, cc.GetClientId()))
+			//TODO: Use an object pool??
+			connectionManager.ClientMessageChannel <- &ClientMessageContainer{
+				Sender:  cc,
+				Message: message,
+			}
 		}
 	}()
 }
@@ -90,8 +138,8 @@ func (cc *ClientConnection) Close() error {
 	return nil
 }
 
-func (clientConnection *ClientConnection) SendErrorResponse(command uint32, errorCode int, errorMessage string) error {
-	pool := clientConnection.owner.transporterMessagePool
+func (cc *ClientConnection) SendErrorResponse(command uint32, errorCode int, errorMessage string) error {
+	pool := cc.owner.transporterMessagePool
 	transportMessage := pool.Obtain()
 	defer pool.Release(transportMessage)
 	transportMessage.SetErrorResponseCommand(command)
@@ -102,12 +150,12 @@ func (clientConnection *ClientConnection) SendErrorResponse(command uint32, erro
 	if err != nil {
 		return err
 	}
-	err = transportMessage.Write(clientConnection.connection)
+	err = transportMessage.Write(cc.connection)
 	return err
 }
 
-func (clientConnection *ClientConnection) SendRoomCreateResponse(roomId string) error {
-	pool := clientConnection.owner.transporterMessagePool
+func (cc *ClientConnection) SendRoomCreateResponse(roomId string) error {
+	pool := cc.owner.transporterMessagePool
 	message := pool.Obtain()
 	defer pool.Release(message)
 	message.SetResponseCommand(protocol.CommandCreateRoom)
@@ -117,12 +165,12 @@ func (clientConnection *ClientConnection) SendRoomCreateResponse(roomId string) 
 	if err != nil {
 		return err
 	}
-	err = message.Write(clientConnection.connection)
+	err = message.Write(cc.connection)
 	return err
 }
 
-func (clientConnection *ClientConnection) SendJoinRoomRequest(roomId string, clientId string) error {
-	pool := clientConnection.owner.transporterMessagePool
+func (cc *ClientConnection) SendJoinRoomRequest(roomId string, clientId string) error {
+	pool := cc.owner.transporterMessagePool
 	message := pool.Obtain()
 	defer pool.Release(message)
 	message.SetDirectCommand(protocol.CommandConnectRoom)
@@ -133,12 +181,12 @@ func (clientConnection *ClientConnection) SendJoinRoomRequest(roomId string, cli
 	if err != nil {
 		return err
 	}
-	err = message.Write(clientConnection.connection)
+	err = message.Write(cc.connection)
 	return err
 }
 
-func (clientConnection *ClientConnection) SendJoinRoomResponse(isAccepted int) error {
-	pool := clientConnection.owner.transporterMessagePool
+func (cc *ClientConnection) SendJoinRoomResponse(isAccepted int) error {
+	pool := cc.owner.transporterMessagePool
 	message := pool.Obtain()
 	defer pool.Release(message)
 
@@ -149,13 +197,28 @@ func (clientConnection *ClientConnection) SendJoinRoomResponse(isAccepted int) e
 	if err != nil {
 		return err
 	}
-	err = message.Write(clientConnection.connection)
+	err = message.Write(cc.connection)
 	return err
 }
 
-func (clientConnection *ClientConnection) handleProtocolMismatchError(clientProtocolVersion uint32) {
-	message := clientConnection.owner.transporterMessagePool.Obtain()
-	defer clientConnection.owner.transporterMessagePool.Release(message)
+func (cc *ClientConnection) SendInvalidPayloadError(command uint32) error {
+	pool := cc.owner.transporterMessagePool
+	message := pool.Obtain()
+	defer pool.Release(message)
+	message.SetErrorResponseCommand(command)
+	err := message.SetErrorPayload(&protocol.TransporterMessagePayloadError{
+		ErrorMessage: "Invalid command payload",
+		ErrorCode:    protocol.ErrorInvalidPayload,
+	})
+	if err != nil {
+		return err
+	}
+	return message.Write(cc.connection)
+}
+
+func (cc *ClientConnection) handleProtocolMismatchError(clientProtocolVersion uint32) {
+	message := cc.owner.transporterMessagePool.Obtain()
+	defer cc.owner.transporterMessagePool.Release(message)
 	log.Printf("Error: Protocol vertsion not supported, transporter: %d, client: %d\n", protocol.ProtocolVersion, clientProtocolVersion)
 	message.SetErrorResponseCommand(protocol.CommandConnect)
 	err := message.SetErrorPayload(&protocol.TransporterMessagePayloadError{
@@ -164,15 +227,15 @@ func (clientConnection *ClientConnection) handleProtocolMismatchError(clientProt
 	})
 	if err != nil {
 		log.Println("Error during the error payload creation", err)
-	} else if err := message.Write(clientConnection.connection); err != nil {
+	} else if err := message.Write(cc.connection); err != nil {
 		log.Println("Error during the message sending to the client: ", err)
 	}
-	clientConnection.owner.internalCloseClient(clientConnection)
+	cc.owner.internalCloseClient(cc)
 }
 
-func (clientConnection *ClientConnection) handleConnectResponse() error {
-	message := clientConnection.owner.transporterMessagePool.Obtain()
-	defer clientConnection.owner.transporterMessagePool.Release(message)
+func (cc *ClientConnection) handleConnectResponse() error {
+	message := cc.owner.transporterMessagePool.Obtain()
+	defer cc.owner.transporterMessagePool.Release(message)
 
 	message.SetResponseCommand(protocol.CommandConnect)
 	err := message.SetPayloadConnectResponse(&protocol.TransporterMessagePayloadConnectResponse{
@@ -181,18 +244,14 @@ func (clientConnection *ClientConnection) handleConnectResponse() error {
 
 	if err != nil {
 		log.Println("Error during the connect response payload creation: ", err)
-		clientConnection.internalClose()
+		cc.internalClose()
 		return err
 	}
 
-	if err := message.Write(clientConnection.connection); err != nil {
+	if err := message.Write(cc.connection); err != nil {
 		log.Println("Error during the connect response payload sending: ", err)
-		clientConnection.internalClose()
+		cc.internalClose()
 		return err
 	}
 	return nil
-}
-
-func (clientConnection *ClientConnection) internalClose() {
-	clientConnection.owner.internalCloseClient(clientConnection)
 }

@@ -1,4 +1,4 @@
 {
-  "transporterAddress": "0.0.0.0:1234",
+  "transporterAddress": "0.0.0.0:3000",
   "transporterType": "tcp"
 }

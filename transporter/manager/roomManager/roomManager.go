@@ -4,6 +4,7 @@ import (
 	"adb-remote.maci.team/shared/protocol"
 	"adb-remote.maci.team/transporter/manager/connectionManager"
 	"adb-remote.maci.team/transporter/utils"
+	"context"
 	"fmt"
 	"log/slog"
 )
@@ -16,31 +17,63 @@ type roomData struct {
 
 type RoomManager struct {
 	//Dependencies
-	connectionManager *connectionManager.IConnectionManager
+	connectionManager *connectionManager.ConnectionManager
 	logger            *slog.Logger
 
 	//Internal state
-	rooms []*roomData
+	rooms        []*roomData
+	ctx          *context.Context
+	cancelSignal context.CancelFunc
 }
 
-func CreateRoomManager(cm *connectionManager.IConnectionManager, logger *slog.Logger) *RoomManager {
+func CreateRoomManager(cm *connectionManager.ConnectionManager, logger *slog.Logger) *RoomManager {
+	logger.Info("Create room manager")
+	ctx, cancelSignal := context.WithCancel(context.Background())
 	roomManager := &RoomManager{
 		connectionManager: cm,
 		logger:            logger,
 		rooms:             make([]*roomData, 0, 10),
+		ctx:               &ctx,
+		cancelSignal:      cancelSignal,
 	}
-	(*cm).RegisterOnClientConnectedCallback(func(connection *connectionManager.ClientConnection) {
 
-	})
-	(*cm).RegisterOnClientDisconnectedCallback(func(connection *connectionManager.ClientConnection) {
+	go func() {
+		for {
+			select {
+			case client := <-cm.ClientDisconnectedChannel:
+				logger.Info(fmt.Sprintf("RoomManager: Client disconnected: %p", client))
+				roomManager.handleClientDisconnected(client)
+			case messageContainer := <-cm.ClientMessageChannel:
+				logger.Info(fmt.Sprintf("RoomManager: %X message received from client: %p", messageContainer.Message.Command(), messageContainer.Sender))
+				switch messageContainer.Message.Command() {
+				case protocol.CommandCreateRoom:
+					roomManager.handleCreateRoom(messageContainer.Sender)
+				case protocol.CommandConnectRoom:
+					payload, err := messageContainer.Message.GetPayloadConnectRoom()
+					if err != nil {
+						err = messageContainer.Sender.SendInvalidPayloadError(messageContainer.Message.Command())
+						if err != nil {
+							_ = messageContainer.Sender.Close()
+						}
+					} else {
+						roomManager.handleJoinRoom(messageContainer.Sender, payload.RoomId)
+					}
+				case protocol.CommandConnectRoomResult:
+					payload, err := messageContainer.Message.GetPayloadConnectRoomResult()
+					if err != nil {
+						logger.Info(fmt.Sprintf("Invalid message payload: %s", err))
+						err = messageContainer.Sender.SendInvalidPayloadError(messageContainer.Message.Command())
+						if err != nil {
+							_ = messageContainer.Sender.Close()
+						}
+					} else {
+						roomManager.handleJoinRoomResponse(messageContainer.Sender, payload.Accepted)
+					}
+				}
 
-	})
-	(*cm).RegisterOnClientMessageCallback(func(connection *connectionManager.ClientConnection, message *protocol.TransporterMessage) {
-		switch message.Command() {
-		case protocol.CommandCreateRoom:
-			roomManager.handleCreateRoom(connection)
+			}
 		}
-	})
+	}()
 
 	return roomManager
 }
@@ -48,12 +81,12 @@ func CreateRoomManager(cm *connectionManager.IConnectionManager, logger *slog.Lo
 func (rm *RoomManager) handleCreateRoom(sender *connectionManager.ClientConnection) {
 	//TODO: Mutex needed here
 	logger := rm.logger
-	logger.Info("%p (%s): Create room request", sender, sender.GetClientId())
+	logger.Info(fmt.Sprintf("%p (%s): Create room request", sender, sender.GetClientId()))
 	if checkClientAlreadyInARoom(rm, sender) {
-		logger.Error("%p (%s): Client already present in a roomData, a client can't occupy more than 1 roomData", sender, sender.GetClientId())
+		logger.Error(fmt.Sprintf("%p (%s): Client already present in a roomData, a client can't occupy more than 1 roomData", sender, sender.GetClientId()))
 		err := sender.SendErrorResponse(protocol.CommandCreateRoom, protocol.ErrorAlreadyInRoom, "You are already occupy a roomData")
 		if err != nil {
-			logger.Error("%p (%s): Client error during the error response sending, close the client connection")
+			logger.Error(fmt.Sprintf("%p (%s): Client error during the error response sending, close the client connection", sender, sender.GetClientId()))
 			_ = sender.Close()
 		}
 		return
@@ -193,5 +226,29 @@ func checkClientAlreadyInARoom(roomManager *RoomManager, connection *connectionM
 	return false
 }
 
-func (rm *RoomManager) handleClientDisconnected() {
+func (rm *RoomManager) handleClientDisconnected(client *connectionManager.ClientConnection) {
+	logger := rm.logger
+	logger.Info(fmt.Sprintf("Client disconnected: %p", client))
+
+	var targetRoom *roomData = nil
+	for _, room := range rm.rooms {
+		if room.owner == client {
+			targetRoom = room
+		} else if room.guest == client {
+			targetRoom = room
+		}
+	}
+
+	if targetRoom == nil {
+		logger.Info(fmt.Sprintf("The disconnected client did not join a room: %p", client))
+		return
+	}
+	if targetRoom.owner == client {
+		logger.Info(fmt.Sprintf("The disconnected client was the room (%s) owner, close the room: %p", targetRoom.roomId, client))
+		rm.closeRoom(targetRoom)
+	} else if targetRoom.guest == client {
+		logger.Info(fmt.Sprintf("The disconnected client was the room (%s) guest, clear the room: %p", targetRoom.roomId, client))
+		_ = targetRoom.guest.Close()
+		targetRoom.guest = nil
+	}
 }

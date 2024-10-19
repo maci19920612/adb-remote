@@ -14,44 +14,36 @@ import (
 
 const ConnectionPoolSize = 10 //TODO: Move this into configuration
 
-type ConnectionManager struct {
-	transporterMessagePool      *shared.TransportMessagePool
-	waitGroup                   *sync.WaitGroup
-	config                      *config.AppConfiguration
-	server                      *net.Listener
-	connections                 *list.List
-	context                     *context.Context
-	cancelFunc                  *context.CancelFunc
-	logger                      *slog.Logger
-	clientConnectedCallbacks    []OnClientConnectedCallback
-	clientDisconnectedCallbacks []OnClientDisconnectedCallback
-	clientMessageCallbacks      []OnClientMessage
+type ClientMessageContainer struct {
+	Sender  *ClientConnection
+	Message *protocol.TransporterMessage
 }
 
-type OnClientConnectedCallback func(connection *ClientConnection)
-type OnClientDisconnectedCallback func(connection *ClientConnection)
-type OnClientMessage func(sender *ClientConnection, message *protocol.TransporterMessage)
-
-type IConnectionManager interface {
-	StartServer() error
-	RegisterOnClientConnectedCallback(callback OnClientConnectedCallback)
-	RegisterOnClientDisconnectedCallback(callback OnClientDisconnectedCallback)
-	RegisterOnClientMessageCallback(callback OnClientMessage)
+type ConnectionManager struct {
+	transporterMessagePool    *shared.TransportMessagePool
+	waitGroup                 *sync.WaitGroup
+	config                    *config.AppConfiguration
+	server                    *net.Listener
+	connections               *list.List
+	context                   *context.Context
+	cancelFunc                *context.CancelFunc
+	logger                    *slog.Logger
+	ClientDisconnectedChannel chan *ClientConnection
+	ClientMessageChannel      chan *ClientMessageContainer
 }
 
 func CreateConnectionManager(config *config.AppConfiguration, logger *slog.Logger) *ConnectionManager {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	return &ConnectionManager{
-		config:                      config,
-		transporterMessagePool:      shared.CreateTransporterMessagePool(),
-		waitGroup:                   new(sync.WaitGroup),
-		connections:                 list.New(),
-		context:                     &ctx,
-		cancelFunc:                  &cancelFunc,
-		logger:                      logger,
-		clientConnectedCallbacks:    make([]OnClientConnectedCallback, 10),
-		clientDisconnectedCallbacks: make([]OnClientDisconnectedCallback, 10),
-		clientMessageCallbacks:      make([]OnClientMessage, 10),
+		config:                    config,
+		transporterMessagePool:    shared.CreateTransporterMessagePool(),
+		waitGroup:                 new(sync.WaitGroup),
+		connections:               list.New(),
+		context:                   &ctx,
+		cancelFunc:                &cancelFunc,
+		logger:                    logger,
+		ClientDisconnectedChannel: make(chan *ClientConnection, ConnectionPoolSize),
+		ClientMessageChannel:      make(chan *ClientMessageContainer, ConnectionPoolSize),
 	}
 }
 
@@ -84,8 +76,9 @@ func (cm *ConnectionManager) StartServer() error {
 			}
 
 			clientConnection := ClientConnection{
-				connection: &connection,
-				owner:      cm,
+				connection:  &connection,
+				owner:       cm,
+				isConnected: true,
 			}
 			clientConnection.start()
 			cm.connections.PushFront(&clientConnection)
@@ -94,16 +87,6 @@ func (cm *ConnectionManager) StartServer() error {
 	cm.waitGroup.Wait()
 
 	return nil
-}
-
-func (cm *ConnectionManager) RegisterOnClientConnectedCallback(callback OnClientConnectedCallback) {
-	cm.clientConnectedCallbacks = append(cm.clientConnectedCallbacks, callback)
-}
-func (cm *ConnectionManager) RegisterOnClientDisconnectedCallback(callback OnClientDisconnectedCallback) {
-	cm.clientDisconnectedCallbacks = append(cm.clientDisconnectedCallbacks, callback)
-}
-func (cm *ConnectionManager) RegisterOnClientMessageCallback(callback OnClientMessage) {
-	cm.clientMessageCallbacks = append(cm.clientMessageCallbacks, callback)
 }
 
 func (cm *ConnectionManager) internalCloseClient(clientConnection *ClientConnection) {
@@ -129,5 +112,6 @@ func (cm *ConnectionManager) internalCloseClient(clientConnection *ClientConnect
 		log.Println("Client connection not registered, can't be closed")
 		return
 	}
+	cm.ClientDisconnectedChannel <- clientConnection
 	connections.Remove(currentElement)
 }
