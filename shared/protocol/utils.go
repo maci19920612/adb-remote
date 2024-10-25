@@ -12,3 +12,7 @@ func EnsureLength(expected int, actual int) error {
 func EnsureIntLength(actual int) error {
 	return EnsureLength(4, actual)
 }
+
+func (tm *TransporterMessage) IsError() bool {
+	return tm.Command()&CommandErrorResponseMask != 0
+}

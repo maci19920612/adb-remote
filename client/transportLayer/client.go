@@ -1,9 +1,11 @@
 package transportLayer
 
 import (
+	"adb-remote.maci.team/client/config"
 	"adb-remote.maci.team/shared"
 	"adb-remote.maci.team/shared/protocol"
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 )
@@ -11,38 +13,47 @@ import (
 const messageChannelBufferSize = 0
 
 type Client struct {
-	connection             *net.Conn
-	context                *context.Context
-	cancelFunc             *context.CancelFunc
-	logger                 *slog.Logger
-	transporterMessagePool *shared.TransportMessagePool
-	MessageChannel         chan *protocol.TransporterMessage
+	connection     *net.Conn
+	context        *context.Context
+	cancelFunc     *context.CancelFunc
+	MessageChannel chan *protocol.TransporterMessage
+
+	//Dependencies
+	TransporterMessagePool *shared.TransportMessagePool
+	Logger                 *slog.Logger
+	Config                 *config.ClientConfiguration
 }
 
-func CreateClient(address string) (*Client, error) {
-	connection, err := net.Dial("tcp", address)
-	if err != nil {
-		return nil, err
-	}
-	ctx, cancelFunc := context.WithCancel(context.Background())
+func CreateClient(logger *slog.Logger, config *config.ClientConfiguration) (*Client, error) {
 
 	client := &Client{
-		connection:             &connection,
-		context:                &ctx,
-		cancelFunc:             &cancelFunc,
-		logger:                 slog.Default(),
-		transporterMessagePool: shared.CreateTransporterMessagePool(),
-		MessageChannel:         make(chan *protocol.TransporterMessage, messageChannelBufferSize),
-	}
+		MessageChannel: make(chan *protocol.TransporterMessage, messageChannelBufferSize),
 
-	go client.startReader()
+		//Dependencies
+		TransporterMessagePool: shared.CreateTransporterMessagePool(),
+		Logger:                 logger,
+		Config:                 config,
+	}
 
 	return client, nil
 }
+func (c *Client) Start() error {
+	address := c.Config.TransporterAddress
+	connection, err := net.Dial("tcp", address)
+	if err != nil {
+		return err
+	}
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	c.context = &ctx
+	c.cancelFunc = &cancelFunc
+	c.connection = &connection
+	go c.startReader()
+	return nil
+}
 
 func (c *Client) startReader() {
-	log := c.logger
-	mPool := c.transporterMessagePool
+	log := c.Logger
+	mPool := c.TransporterMessagePool
 	ctx := *c.context
 	for {
 		select {
@@ -68,12 +79,29 @@ func (c *Client) Close() {
 }
 
 func (c *Client) Release(message *protocol.TransporterMessage) {
-	c.transporterMessagePool.Release(message)
+	c.TransporterMessagePool.Release(message)
+}
+
+func (c *Client) SendError(command uint32, errorCode int, errorMessage string) error {
+	log := c.Logger
+	mPool := c.TransporterMessagePool
+	log.Info(fmt.Sprintf("SendError(%d, %s) called", errorCode, errorMessage))
+
+	errorTransporterMessage := mPool.Obtain()
+	errorTransporterMessage.SetErrorResponseCommand(command)
+	err := errorTransporterMessage.SetErrorPayload(&protocol.TransporterMessagePayloadError{
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+	})
+	if err != nil {
+		return err
+	}
+	return errorTransporterMessage.Write(c.connection)
 }
 
 func (c *Client) SendConnect() error {
-	log := c.logger
-	mPool := c.transporterMessagePool
+	log := c.Logger
+	mPool := c.TransporterMessagePool
 
 	log.Info("SendConnect called")
 
@@ -91,8 +119,8 @@ func (c *Client) SendConnect() error {
 }
 
 func (c *Client) SendCreateRoom() error {
-	log := c.logger
-	mPool := c.transporterMessagePool
+	log := c.Logger
+	mPool := c.TransporterMessagePool
 
 	log.Info("SendCreateRoom called")
 	m := mPool.Obtain()
@@ -104,14 +132,14 @@ func (c *Client) SendCreateRoom() error {
 }
 
 func (c *Client) SendJoinRoom(roomId string) error {
-	log := c.logger
-	mPool := c.transporterMessagePool
+	log := c.Logger
+	mPool := c.TransporterMessagePool
 	m := mPool.Obtain()
 	defer mPool.Release(m)
 
 	log.Info("SendJoinRoom(%s) called", roomId)
 
-	m.SetDirectCommand(protocol.CommandConnectRoom)
+	m.SetDirectCommand(protocol.CommandJoinRoom)
 	err := m.SetPayloadConnectRoom(&protocol.TransporterMessagePayloadConnectRoom{
 		RoomId: roomId,
 	})
@@ -123,14 +151,14 @@ func (c *Client) SendJoinRoom(roomId string) error {
 }
 
 func (c *Client) SendJoinRoomResponse(isAccepted int) error {
-	log := c.logger
-	mPool := c.transporterMessagePool
+	log := c.Logger
+	mPool := c.TransporterMessagePool
 	m := mPool.Obtain()
 	defer mPool.Release(m)
 
 	log.Info("SendJoinRoomResponse(%d) called", isAccepted)
 
-	m.SetDirectCommand(protocol.CommandConnectRoomResult)
+	m.SetResponseCommand(protocol.CommandJoinRoom)
 	err := m.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{
 		Accepted: isAccepted,
 	})

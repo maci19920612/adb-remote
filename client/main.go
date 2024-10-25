@@ -1,10 +1,9 @@
 package main
 
 import (
+	"adb-remote.maci.team/client/command"
+	"adb-remote.maci.team/client/di"
 	"adb-remote.maci.team/client/models"
-	"adb-remote.maci.team/client/transportLayer"
-	"adb-remote.maci.team/shared/protocol"
-	"fmt"
 	"log"
 )
 
@@ -73,36 +72,43 @@ func main() {
 	//	adb_message.Dump(models.MessageDirectionOut)
 	//	connection.Write(global_buffer[0:length])
 
-	client, err := transportLayer.CreateClient("127.0.0.1:3000")
+	//appContainer := di.CreateContainer()
+	//var client transportLayer.Client
+	//appContainer.Resolve(&client)
+	//controller.Handshake(client)
+	//
+	//if err := client.SendConnect(); err != nil {
+	//	panic(err)
+	//}
+	//
+	//connectResponseMessage := <-client.MessageChannel
+	//if err := protocol.ExpectCommand(connectResponseMessage, protocol.CommandConnect|protocol.CommandResponseMask); err != nil {
+	//	panic(err)
+	//}
+	//response, err := connectResponseMessage.GetPayloadConnectResponse()
+	//if err != nil {
+	//	panic(err)
+	//}
+	//fmt.Printf("YOUR CLIENT ID: %s\n", response.ClientId)
+	//client.Release(connectResponseMessage)
+	//
+	//if err := client.SendCreateRoom(); err != nil {
+	//	panic(err)
+	//}
+	//createRoomResponseMessage := <-client.MessageChannel
+	//if err := protocol.ExpectCommand(createRoomResponseMessage, protocol.CommandCreateRoom|protocol.CommandResponseMask); err != nil {
+	//	panic(err)
+	//}
+	//createRoomResponsePayload, err := createRoomResponseMessage.GetPayloadCreateRoomResponse()
+	//if err != nil {
+	//	panic(err)
+	//}
+	//fmt.Printf("ROOM CREATED, ROOM ID: %s\n", createRoomResponsePayload.RoomId)
+	container := di.CreateContainer()
+	var commands []*command.Command[command.BaseCommand]
+	err := container.Resolve(&commands)
 	if err != nil {
 		panic(err)
 	}
-
-	if err := client.SendConnect(); err != nil {
-		panic(err)
-	}
-
-	connectResponseMessage := <-client.MessageChannel
-	if err := protocol.ExpectCommand(connectResponseMessage, protocol.CommandConnect|protocol.CommandResponseMask); err != nil {
-		panic(err)
-	}
-	response, err := connectResponseMessage.GetPayloadConnectResponse()
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("YOUR CLIENT ID: %s\n", response.ClientId)
-	client.Release(connectResponseMessage)
-
-	if err := client.SendCreateRoom(); err != nil {
-		panic(err)
-	}
-	createRoomResponseMessage := <-client.MessageChannel
-	if err := protocol.ExpectCommand(createRoomResponseMessage, protocol.CommandCreateRoom|protocol.CommandResponseMask); err != nil {
-		panic(err)
-	}
-	createRoomResponsePayload, err := createRoomResponseMessage.GetPayloadCreateRoomResponse()
-	if err != nil {
-		panic(err)
-	}
-	fmt.Printf("ROOM CREATED, ROOM ID: %s\n", createRoomResponsePayload.RoomId)
+	command.ParseCommand(commands)
 }

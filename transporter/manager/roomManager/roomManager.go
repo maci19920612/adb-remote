@@ -48,7 +48,7 @@ func CreateRoomManager(cm *connectionManager.ConnectionManager, logger *slog.Log
 				switch messageContainer.Message.Command() {
 				case protocol.CommandCreateRoom:
 					roomManager.handleCreateRoom(messageContainer.Sender)
-				case protocol.CommandConnectRoom:
+				case protocol.CommandJoinRoom:
 					payload, err := messageContainer.Message.GetPayloadConnectRoom()
 					if err != nil {
 						err = messageContainer.Sender.SendInvalidPayloadError(messageContainer.Message.Command())
@@ -58,7 +58,7 @@ func CreateRoomManager(cm *connectionManager.ConnectionManager, logger *slog.Log
 					} else {
 						roomManager.handleJoinRoom(messageContainer.Sender, payload.RoomId)
 					}
-				case protocol.CommandConnectRoomResult:
+				case protocol.CommandJoinRoom | protocol.CommandResponseMask:
 					payload, err := messageContainer.Message.GetPayloadConnectRoomResult()
 					if err != nil {
 						logger.Info(fmt.Sprintf("Invalid message payload: %s", err))
@@ -121,7 +121,7 @@ func (rm *RoomManager) handleJoinRoom(sender *connectionManager.ClientConnection
 	if targetRoomIndex == -1 {
 		logger.Error("%p (%s): Client can't connect to the room %s: The room does not exists", sender, sender.GetClientId(), roomId)
 		err := sender.SendErrorResponse(
-			protocol.CommandConnectRoom,
+			protocol.CommandJoinRoom,
 			protocol.ErrorRoomNotFound,
 			fmt.Sprintf("Room not found with this id: %s", roomId),
 		)
@@ -138,7 +138,7 @@ func (rm *RoomManager) handleJoinRoom(sender *connectionManager.ClientConnection
 	err := owner.SendJoinRoomRequest(roomId, sender.GetClientId())
 	if err != nil {
 		logger.Error("%p (%s): Error during the send join room request sending to the room owner: %s", owner, owner.GetClientId(), err)
-		err := sender.SendErrorResponse(protocol.CommandConnectRoom, protocol.ErrorUnknown, "Couldn't send the join request to the room owner, closing down the room")
+		err := sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorUnknown, "Couldn't send the join request to the room owner, closing down the room")
 		if err != nil {
 			logger.Error("%p (%s): SendError", sender, sender.GetClientId())
 		}
@@ -157,7 +157,7 @@ func (rm *RoomManager) handleJoinRoomResponse(sender *connectionManager.ClientCo
 	}
 	if targetRoom == nil {
 		logger.Error("%p (%s): Room not found by owner", sender, sender.GetClientId())
-		err := sender.SendErrorResponse(protocol.CommandConnectRoomResult, protocol.ErrorRoomNotFound, fmt.Sprintf("No room found where the sender is the owner"))
+		err := sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorRoomNotFound, fmt.Sprintf("No room found where the sender is the owner"))
 		if err != nil {
 			_ = sender.Close()
 			logger.Error("%p (%s): Error during the error response sending: %s", sender, sender.GetClientId(), err)
@@ -167,7 +167,7 @@ func (rm *RoomManager) handleJoinRoomResponse(sender *connectionManager.ClientCo
 
 	if targetRoom.guest == nil {
 		logger.Error("%p (%s): Room was empty", sender, sender.GetClientId())
-		err := sender.SendErrorResponse(protocol.CommandConnectRoomResult, protocol.ErrorNoParticipant, fmt.Sprintf("You are in an empty room"))
+		err := sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorNoParticipant, fmt.Sprintf("You are in an empty room"))
 		if err != nil {
 			logger.Error("%p (%s): Error during the error response sending %s", sender, sender.GetClientId(), err)
 			rm.closeRoom(targetRoom)
@@ -180,7 +180,7 @@ func (rm *RoomManager) handleJoinRoomResponse(sender *connectionManager.ClientCo
 		_ = targetRoom.guest.Close()
 		targetRoom.guest = nil
 
-		err = sender.SendErrorResponse(protocol.CommandConnectRoomResult, protocol.ErrorNoParticipant, "participant disconnected during the response sending, the room is waiting for an another participant")
+		err = sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorNoParticipant, "participant disconnected during the response sending, the room is waiting for an another participant")
 		if err != nil {
 			rm.closeRoom(targetRoom)
 		}

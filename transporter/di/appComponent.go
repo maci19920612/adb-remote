@@ -43,7 +43,7 @@ func registerConfiguration(container *container.Container) {
 	}
 
 	configInstance := config.CreateConfig(path.Join(workingDirectory, ConfigFileName))
-	err = container.Singleton(func() *config.AppConfiguration {
+	err = container.Singleton(func() *config.TransporterConfiguration {
 		return configInstance
 	})
 
@@ -53,7 +53,7 @@ func registerConfiguration(container *container.Container) {
 }
 
 func registerConnectionManager(container *container.Container) {
-	err := container.Singleton(func(config *config.AppConfiguration, logger *slog.Logger) *connectionManager.ConnectionManager {
+	err := container.Singleton(func(config *config.TransporterConfiguration, logger *slog.Logger) *connectionManager.ConnectionManager {
 		return connectionManager.CreateConnectionManager(config, logger)
 	})
 	if err != nil {

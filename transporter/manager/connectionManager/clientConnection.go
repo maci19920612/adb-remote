@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"log/slog"
 	"net"
 )
 
@@ -33,10 +32,8 @@ func (cc *ClientConnection) start() {
 	connectionManager := cc.owner
 	logger := cc.owner.logger
 	messagePool := cc.owner.transporterMessagePool
-	logger.Info("Testing the log framework", []slog.Attr{
-		slog.String("client", fmt.Sprintf("%p", cc)),
-	})
-	logger.Info(fmt.Sprintf("%p (-): Client connection started", cc))
+	logger.Info("Client connection started", "clientReference", fmt.Sprintf("%p", cc))
+	//logger.Info(fmt.Sprintf("%p (-): Client connection started", cc))
 	go func() {
 		connectTransporterMessage := messagePool.Obtain()
 		err := connectTransporterMessage.Read(cc.connection)
@@ -173,7 +170,7 @@ func (cc *ClientConnection) SendJoinRoomRequest(roomId string, clientId string) 
 	pool := cc.owner.transporterMessagePool
 	message := pool.Obtain()
 	defer pool.Release(message)
-	message.SetDirectCommand(protocol.CommandConnectRoom)
+	message.SetDirectCommand(protocol.CommandJoinRoom)
 	err := message.SetPayloadConnectRoom(&protocol.TransporterMessagePayloadConnectRoom{
 		RoomId:   roomId,
 		ClientId: clientId,
@@ -189,8 +186,7 @@ func (cc *ClientConnection) SendJoinRoomResponse(isAccepted int) error {
 	pool := cc.owner.transporterMessagePool
 	message := pool.Obtain()
 	defer pool.Release(message)
-
-	message.SetDirectCommand(protocol.CommandConnectRoomResult)
+	message.SetResponseCommand(protocol.CommandJoinRoom)
 	err := message.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{
 		Accepted: isAccepted,
 	})

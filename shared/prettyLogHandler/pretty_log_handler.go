@@ -3,6 +3,7 @@ package prettyLogHandler
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -48,6 +49,27 @@ func CreatePrettyHandler(opts *slog.HandlerOptions) *Handler {
 		}),
 		mutex: &sync.Mutex{},
 	}
+}
+
+func (h *Handler) computeAttrs(
+	ctx context.Context,
+	r slog.Record,
+) (map[string]any, error) {
+	h.mutex.Lock()
+	defer func() {
+		h.buffer.Reset()
+		h.mutex.Unlock()
+	}()
+	if err := h.slogHandler.Handle(ctx, r); err != nil {
+		return nil, fmt.Errorf("error when calling inner handler's Handle: %w", err)
+	}
+
+	var attrs map[string]any
+	err := json.Unmarshal(h.buffer.Bytes(), &attrs)
+	if err != nil {
+		return nil, fmt.Errorf("error when unmarshaling inner handler's Handle result: %w", err)
+	}
+	return attrs, nil
 }
 
 func suppressDefaults(
@@ -97,6 +119,7 @@ const (
 )
 
 func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
+
 	level := r.Level.String() + ":"
 
 	switch r.Level {
@@ -110,10 +133,21 @@ func (h *Handler) Handle(ctx context.Context, r slog.Record) error {
 		level = colorize(lightRed, level)
 	}
 
+	attrs, err := h.computeAttrs(ctx, r)
+	if err != nil {
+		return err
+	}
+
+	bytes, err := json.MarshalIndent(attrs, "", "  ")
+	if err != nil {
+		return fmt.Errorf("error when marshaling attrs: %w", err)
+	}
+
 	fmt.Println(
 		colorize(lightGray, r.Time.Format(timeFormat)),
 		level,
 		colorize(white, r.Message),
+		colorize(darkGray, string(bytes)),
 	)
 
 	return nil

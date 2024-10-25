@@ -22,7 +22,7 @@ type ClientMessageContainer struct {
 type ConnectionManager struct {
 	transporterMessagePool    *shared.TransportMessagePool
 	waitGroup                 *sync.WaitGroup
-	config                    *config.AppConfiguration
+	config                    *config.TransporterConfiguration
 	server                    *net.Listener
 	connections               *list.List
 	context                   *context.Context
@@ -32,7 +32,7 @@ type ConnectionManager struct {
 	ClientMessageChannel      chan *ClientMessageContainer
 }
 
-func CreateConnectionManager(config *config.AppConfiguration, logger *slog.Logger) *ConnectionManager {
+func CreateConnectionManager(config *config.TransporterConfiguration, logger *slog.Logger) *ConnectionManager {
 	ctx, cancelFunc := context.WithCancel(context.Background())
 	return &ConnectionManager{
 		config:                    config,
@@ -50,9 +50,7 @@ func CreateConnectionManager(config *config.AppConfiguration, logger *slog.Logge
 func (cm *ConnectionManager) StartServer() error {
 	logger := cm.logger
 	logger.Info("Starting the transporter server")
-	serverAddress := cm.config.TransporterAddress
-	serverType := cm.config.TransporterType
-	server, err := net.Listen(serverType, serverAddress)
+	server, err := net.Listen("tcp", cm.config.Address)
 	if err != nil {
 		logger.Error("Transporter server can't be created: %s", err)
 		return err
