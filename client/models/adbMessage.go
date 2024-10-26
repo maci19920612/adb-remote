@@ -6,12 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
+	"io"
 	"strings"
 )
 
 const (
 	magicConstant    = 0xffffffff
-	maxPayloadLength = 0x1000
+	MaxPayloadLength = 0x1000
 	HeaderSize       = 0x0018
 )
 
@@ -54,119 +55,129 @@ func validateData(data []byte, expectedCrc32 uint32) error {
 	return nil
 }
 
-type TransportOut interface {
-	Write(data []byte) error
-}
-
-type TransportIn interface {
-	Read(data []byte) error
-}
-
 type AdbMessage struct {
-	Command    uint32
-	Arg1       uint32
-	Arg2       uint32
-	DataLength uint32
-	DataCRC32  uint32
-	Magic      uint32
-	Data       []byte
+	command       []byte
+	arg1          []byte
+	arg2          []byte
+	dataLength    []byte
+	dataCRC32     []byte
+	magic         []byte
+	data          []byte
+	headerBuffer  []byte
+	messageBuffer []byte
+}
+
+func (c *AdbMessage) Command() uint32 {
+	return binary.LittleEndian.Uint32(c.command)
+}
+
+func (c *AdbMessage) CommandStirng() string {
+	stringCommandBytes := make([]byte, 4)
+	binary.NativeEndian.PutUint32(stringCommandBytes, c.Command())
+	return string(stringCommandBytes)
+}
+
+func (c *AdbMessage) Arg1() uint32 {
+	return binary.LittleEndian.Uint32(c.arg1)
+}
+
+func (c *AdbMessage) Arg2() uint32 {
+	return binary.LittleEndian.Uint32(c.arg2)
+}
+
+func (c *AdbMessage) DataLength() uint32 {
+	return binary.LittleEndian.Uint32(c.dataLength)
+}
+
+func (c *AdbMessage) DataCRC32() uint32 {
+	return binary.LittleEndian.Uint32(c.dataCRC32)
+}
+
+func (c *AdbMessage) Magic() uint32 {
+	return binary.LittleEndian.Uint32(c.magic)
+}
+
+func (c *AdbMessage) DataString() string {
+	return string(c.data[:c.DataLength()])
+}
+
+func (c *AdbMessage) Data() []byte {
+	return c.data
 }
 
 func CreateMessage() *AdbMessage {
+	messageBuffer := make([]byte, HeaderSize+MaxPayloadLength)
 	return &AdbMessage{
-		Data: make([]byte, maxPayloadLength),
+		command:       messageBuffer[0:4],
+		arg1:          messageBuffer[4:8],
+		arg2:          messageBuffer[8:12],
+		dataLength:    messageBuffer[12:16],
+		dataCRC32:     messageBuffer[16:20],
+		magic:         messageBuffer[20:24],
+		data:          messageBuffer[HeaderSize:],
+		headerBuffer:  messageBuffer[0:HeaderSize],
+		messageBuffer: messageBuffer,
 	}
 }
 
-func (command *AdbMessage) ReadHeader(source []byte) error {
-	if actualSize := len(source); actualSize < HeaderSize {
-		return fmt.Errorf("Invalid source buffer length, expected: %d, actual: %d", HeaderSize, actualSize)
-	}
-	command.Command = binary.LittleEndian.Uint32(source[0:4])
-	command.Arg1 = binary.LittleEndian.Uint32(source[4:8])
-	command.Arg2 = binary.LittleEndian.Uint32(source[8:12])
-	command.DataLength = binary.LittleEndian.Uint32(source[12:16])
-	command.DataCRC32 = binary.LittleEndian.Uint32(source[16:20])
-	command.Magic = binary.LittleEndian.Uint32(source[20:24])
-	if err := validateCommand(command.Command); err != nil {
+func (c *AdbMessage) Read(reader io.Reader) error {
+	length, err := reader.Read(c.headerBuffer)
+	if err != nil {
 		return err
 	}
-	if err := validateMagic(command.Command, command.Magic); err != nil {
+	if length != HeaderSize {
+		return fmt.Errorf("invalid message got on incoming stream, expected length: %d, actual length: %d", HeaderSize, length)
+	}
+	if err := validateCommand(c.Command()); err != nil {
+		return err
+	}
+	if err := validateMagic(c.Command(), c.Magic()); err != nil {
+		return err
+	}
+	length, err = reader.Read(c.data[:c.DataLength()])
+	if err != nil {
+		return err
+	}
+	if length != int(c.DataLength()) {
+		return fmt.Errorf("invalid message got on the incoming stream, expected length: %d, actual length: %d", c.DataLength(), length)
+	}
+	if err := validateData(c.data[:c.DataLength()], c.DataCRC32()); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (command *AdbMessage) ReadData(data []byte) error {
-	//Here we should not reread this from a byte array
-	targetDataSection := command.Data[0:command.DataLength]
-	copy(targetDataSection, data)
-	if err := validateData(targetDataSection, command.DataCRC32); err != nil {
-		return err
-	}
-	return nil
+func (c *AdbMessage) Write(writer io.Writer) error {
+	dataLength := int(c.DataLength())
+	_, err := writer.Write(c.messageBuffer[:HeaderSize+dataLength])
+	return err
 }
 
-func (command *AdbMessage) Write(target []byte) (int, error) {
-	expectedSize := int(command.DataLength) + HeaderSize
-	if actualSize := len(target); actualSize < expectedSize {
-		return 0, fmt.Errorf("Invalid parameter buffer, can't fot the package into the buffer: expectedSize: %d, actualSize: %d", expectedSize, actualSize)
+func (c *AdbMessage) DumpParsed() string {
+	dumpBuilder := strings.Builder{}
+	columnSize := 15
+	dumpBuilder.WriteString(fmt.Sprintf("%-*s %s\n", columnSize, "Command:", c.CommandStirng()))
+	dumpBuilder.WriteString(fmt.Sprintf("%-*s %x\n", columnSize, "Raw command:", c.Command()))
+	dumpBuilder.WriteString(fmt.Sprintf("%-*s %x\n", columnSize, "Arg1:", c.Arg1()))
+	dumpBuilder.WriteString(fmt.Sprintf("%-*s %x\n", columnSize, "Arg2:", c.Arg1()))
+	dumpBuilder.WriteString(fmt.Sprintf("%-*s %d\n", columnSize, "DataL:", c.DataLength()))
+	dumpBuilder.WriteString(fmt.Sprintf("%-*s %x\n", columnSize, "DataC:", c.DataCRC32()))
+	dumpBuilder.WriteString(fmt.Sprintf("%-*s %x\n", columnSize, "Magic:", c.Magic()))
+
+	if c.DataLength() > 0 {
+		dumpBuilder.WriteString("Data:\n")
+		dumpBuilder.WriteString(hex.Dump(c.data[:c.DataLength()]))
 	}
-	binary.LittleEndian.PutUint32(target[0:], command.Command)
-	binary.LittleEndian.PutUint32(target[4:], command.Arg1)
-	binary.LittleEndian.PutUint32(target[8:], command.Arg2)
-	binary.LittleEndian.PutUint32(target[12:], command.DataLength)
-	binary.LittleEndian.PutUint32(target[16:], command.DataCRC32)
-	binary.LittleEndian.PutUint32(target[20:], command.Magic)
-	copy(target[HeaderSize:HeaderSize+command.DataLength], command.Data[:])
-	return expectedSize, nil
+
+	return dumpBuilder.String()
 }
 
-type messageDirection rune
-
-const (
-	MessageDirectionIn  messageDirection = '<'
-	MessageDirectionOut messageDirection = '>'
-)
-
-func (command *AdbMessage) Dump(direction messageDirection) {
-	delimiterBuilder := strings.Builder{}
-	delimiterBuilder.WriteString("(client) ")
-	delimiterSize := 10
-	for i := 0; i < delimiterSize; i++ {
-		delimiterBuilder.WriteRune(rune(direction))
-	}
-	delimiterBuilder.WriteString(" (server)")
-	fmt.Println(delimiterBuilder.String())
-	fmt.Printf("Command: \t%x\n", command.Command)
-	fmt.Printf("Arg1: \t%d\n", command.Arg1)
-	fmt.Printf("Arg2: \t%d\n", command.Arg2)
-	fmt.Printf("DataL: \t%d\n", command.DataLength)
-	fmt.Printf("DataC: \t%d\n", command.DataCRC32)
-	fmt.Printf("Magic: \t%d\n", command.Magic)
-	if command.DataLength > 0 {
-		fmt.Println("Data: ")
-		hex.Dump(command.Data[:command.DataLength])
-	}
-	fmt.Println(delimiterBuilder.String())
-}
-
-func (adbCommand *AdbMessage) SetHeader(command uint32, arg1 uint32, arg2 uint32, data []byte) error {
-	if dataSize := len(data); dataSize > maxPayloadLength {
-		return errors.New(fmt.Sprintf("Payload size not supported, expectedSize: %d, actialSize: %d", maxPayloadLength, dataSize))
-	}
-	adbCommand.Command = command
-	adbCommand.Arg1 = arg1
-	adbCommand.Arg2 = arg2
-	adbCommand.Magic = command ^ magicConstant
-	if data == nil {
-		adbCommand.DataLength = uint32(len(data))
-		adbCommand.DataCRC32 = crc32.ChecksumIEEE(data)
-		targetReference := adbCommand.Data[:len(data)]
-		copy(targetReference, data)
-	} else {
-		adbCommand.DataLength = 0
-		adbCommand.DataCRC32 = 0
-	}
-	return nil
+func (c *AdbMessage) Set(command uint32, arg1 uint32, arg2 uint32, data []byte) {
+	binary.LittleEndian.PutUint32(c.command, command)
+	binary.LittleEndian.PutUint32(c.arg1, arg1)
+	binary.LittleEndian.PutUint32(c.arg2, arg2)
+	binary.LittleEndian.PutUint32(c.dataLength, uint32(len(data)))
+	binary.LittleEndian.PutUint32(c.dataCRC32, crc32.ChecksumIEEE(data))
+	binary.LittleEndian.PutUint32(c.magic, command^magicConstant)
+	copy(c.data, data)
 }
