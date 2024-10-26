@@ -59,7 +59,7 @@ func CreateRoomManager(cm *connectionManager.ConnectionManager, logger *slog.Log
 						roomManager.handleJoinRoom(messageContainer.Sender, payload.RoomId)
 					}
 				case protocol.CommandJoinRoom | protocol.CommandResponseMask:
-					payload, err := messageContainer.Message.GetPayloadConnectRoomResult()
+					payload, err := messageContainer.Message.GetPayloadConnectRoomResponse()
 					if err != nil {
 						logger.Info(fmt.Sprintf("Invalid message payload: %s", err))
 						err = messageContainer.Sender.SendInvalidPayloadError(messageContainer.Message.Command())

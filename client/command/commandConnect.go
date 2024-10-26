@@ -8,7 +8,11 @@ import (
 	"log/slog"
 )
 
-func CreateConnectCommand(logger *slog.Logger, client *transportLayer.Client, config *config.ClientConfiguration) *Command[BaseCommand] {
+func CreateConnectCommand(
+	logger *slog.Logger,
+	client *transportLayer.Client,
+	config *config.ClientConfiguration,
+) *Command[BaseCommand] {
 	return &Command[BaseCommand]{
 		Name: "connect",
 		Handler: func(args BaseCommand) error {

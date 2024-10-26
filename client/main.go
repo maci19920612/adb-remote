@@ -1,14 +1,14 @@
 package main
 
 import (
+	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/command"
 	"adb-remote.maci.team/client/di"
-	"adb-remote.maci.team/client/models"
 	"log"
 )
 
 var global_buffer = make([]byte, 1024*1024)
-var adb_message = new(models.AdbMessage)
+var adb_message = new(adb.AdbMessage)
 
 func setupLogger() {
 	logger := log.Default()
@@ -17,7 +17,7 @@ func setupLogger() {
 
 func main() {
 	//setupLogger()
-	//smartSocket := CreateDefaultHost()
+	//smartSocket := NewAdbSmartSocket()
 	//deviceList, err := smartSocket.DeviceList()
 	//if err != nil {
 	//	panic(err)

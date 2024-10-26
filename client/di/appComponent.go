@@ -1,6 +1,7 @@
 package di
 
 import (
+	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/command"
 	"adb-remote.maci.team/client/config"
 	"adb-remote.maci.team/client/transportLayer"
@@ -9,18 +10,13 @@ import (
 	"log/slog"
 )
 
-const (
-	ControllerBase  = "KeyControllerBase"
-	ControllerOwner = "KeyControllerOwner"
-	ControllerGuest = "KeyControllerGuest"
-)
-
 func CreateContainer() *container.Container {
 	cont := container.New()
 	registerLogger(&cont)
 	registerConfig(&cont)
 	registerClient(&cont)
 	registerCommands(&cont)
+	registerAdbProxy(&cont)
 	return &cont
 }
 
@@ -61,4 +57,18 @@ func registerCommands(container *container.Container) {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func registerAdbProxy(container *container.Container) {
+	err := container.Singleton(func(logger *slog.Logger, client *transportLayer.Client, config *config.ClientConfiguration) adb.IAdbProxy {
+		return adb.NewAdbProxy(config.TransporterAddress, logger, client)
+	})
+	if err != nil {
+		panic(err)
+	}
+}
+
+func registerAdbSmartSocket(container *container.Container) {
+	err := container.Singleton(func(logger *slog.Logger) {
+	})
 }

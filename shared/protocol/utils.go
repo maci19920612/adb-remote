@@ -13,6 +13,6 @@ func EnsureIntLength(actual int) error {
 	return EnsureLength(4, actual)
 }
 
-func (tm *TransporterMessage) IsError() bool {
-	return tm.Command()&CommandErrorResponseMask != 0
+func (m *TransporterMessage) IsError() bool {
+	return m.Command()&CommandErrorResponseMask != 0
 }

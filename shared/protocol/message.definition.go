@@ -28,39 +28,48 @@ func CreateTransporterMessage() *TransporterMessage {
 	}
 }
 
-func (message *TransporterMessage) Command() uint32 {
-	return ByteOrder.Uint32(message.commandBuffer)
+func (m *TransporterMessage) Command() uint32 {
+	return ByteOrder.Uint32(m.commandBuffer)
 }
-func (message *TransporterMessage) PayloadLength() uint32 {
-	return ByteOrder.Uint32(message.payloadLengthBuffer)
+func (m *TransporterMessage) PayloadLength() uint32 {
+	return ByteOrder.Uint32(m.payloadLengthBuffer)
 }
-func (message *TransporterMessage) PayloadCRC32() uint32 {
-	return ByteOrder.Uint32(message.payloadCrc32Buffer)
-}
-
-func (message *TransporterMessage) SetDirectCommand(command uint32) {
-	ByteOrder.PutUint32(message.commandBuffer, command)
+func (m *TransporterMessage) PayloadCRC32() uint32 {
+	return ByteOrder.Uint32(m.payloadCrc32Buffer)
 }
 
-func (message *TransporterMessage) SetResponseCommand(command uint32) {
-	message.SetDirectCommand(command | CommandResponseMask)
+func (m *TransporterMessage) SetDirectCommand(command uint32) {
+	ByteOrder.PutUint32(m.commandBuffer, command)
 }
 
-func (message *TransporterMessage) SetErrorResponseCommand(command uint32) {
-	message.SetDirectCommand(command | CommandErrorResponseMask)
+func (m *TransporterMessage) SetResponseCommand(command uint32) {
+	m.SetDirectCommand(command | CommandResponseMask)
 }
 
-func (message *TransporterMessage) Read(reader *net.Conn) error {
-	length, err := (*reader).Read(message.headerBuffer)
+func (m *TransporterMessage) SetErrorResponseCommand(command uint32) {
+	m.SetDirectCommand(command | CommandErrorResponseMask)
+}
+
+/*
+This only used when we want to write the payload form a separate buffer
+*/
+func (m *TransporterMessage) SetHeader(command uint32, payloadLength uint32, payloadCrc32 uint32) {
+	ByteOrder.PutUint32(m.commandBuffer, command)
+	ByteOrder.PutUint32(m.payloadLengthBuffer, payloadLength)
+	ByteOrder.PutUint32(m.payloadCrc32Buffer, payloadCrc32)
+}
+
+func (m *TransporterMessage) Read(reader *net.Conn) error {
+	length, err := (*reader).Read(m.headerBuffer)
 	if err != nil {
 		return err
 	}
-	if err := EnsureLength(len(message.headerBuffer), length); err != nil {
+	if err := EnsureLength(len(m.headerBuffer), length); err != nil {
 		return err
 	}
-	payloadLength := message.PayloadLength()
+	payloadLength := m.PayloadLength()
 	if payloadLength > 0 {
-		length, err := (*reader).Read(message.payloadBuffer[:payloadLength])
+		length, err := (*reader).Read(m.payloadBuffer[:payloadLength])
 		if err != nil {
 			return err
 		}
@@ -71,23 +80,35 @@ func (message *TransporterMessage) Read(reader *net.Conn) error {
 	return nil
 }
 
-func (message *TransporterMessage) Write(writer *net.Conn) error {
-	length, err := (*writer).Write(message.headerBuffer)
+func (m *TransporterMessage) Write(writer *net.Conn) error {
+	length, err := (*writer).Write(m.headerBuffer)
 	if err != nil {
 		return err
 	}
-	if err := EnsureLength(len(message.headerBuffer), length); err != nil {
+	if err := EnsureLength(len(m.headerBuffer), length); err != nil {
 		return err
 	}
-	payloadLength := message.PayloadLength()
+	payloadLength := m.PayloadLength()
 	if payloadLength > 0 {
-		length, err := (*writer).Write(message.payloadBuffer[:payloadLength])
+		length, err := (*writer).Write(m.payloadBuffer[:payloadLength])
 		if err != nil {
 			return err
 		}
 		if err := EnsureLength(int(payloadLength), length); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (m *TransporterMessage) WriteHeader(writer *net.Conn) error {
+	resWriter := *writer
+	length, err := resWriter.Write(m.headerBuffer)
+	if err != nil {
+		return err
+	}
+	if err := EnsureLength(len(m.headerBuffer), length); err != nil {
+		return err
 	}
 	return nil
 }

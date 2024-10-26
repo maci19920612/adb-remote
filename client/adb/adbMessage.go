@@ -1,4 +1,4 @@
-package models
+package adb
 
 import (
 	"encoding/binary"
@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/crc32"
-	"io"
+	"net"
 	"strings"
 )
 
@@ -120,8 +120,8 @@ func CreateMessage() *AdbMessage {
 	}
 }
 
-func (c *AdbMessage) Read(reader io.Reader) error {
-	length, err := reader.Read(c.headerBuffer)
+func (c *AdbMessage) Read(reader *net.Conn) error {
+	length, err := (*reader).Read(c.headerBuffer)
 	if err != nil {
 		return err
 	}
@@ -134,7 +134,7 @@ func (c *AdbMessage) Read(reader io.Reader) error {
 	if err := validateMagic(c.Command(), c.Magic()); err != nil {
 		return err
 	}
-	length, err = reader.Read(c.data[:c.DataLength()])
+	length, err = (*reader).Read(c.data[:c.DataLength()])
 	if err != nil {
 		return err
 	}
@@ -147,9 +147,9 @@ func (c *AdbMessage) Read(reader io.Reader) error {
 	return nil
 }
 
-func (c *AdbMessage) Write(writer io.Writer) error {
+func (c *AdbMessage) Write(writer *net.Conn) error {
 	dataLength := int(c.DataLength())
-	_, err := writer.Write(c.messageBuffer[:HeaderSize+dataLength])
+	_, err := (*writer).Write(c.messageBuffer[:HeaderSize+dataLength])
 	return err
 }
 

@@ -11,12 +11,12 @@ type TransporterMessagePayloadError struct {
 	ErrorMessage string
 }
 
-func (message *TransporterMessage) GetErrorPayload() (*TransporterMessagePayloadError, error) {
-	offset, errorCode, err := message.readInt(0)
+func (m *TransporterMessage) GetErrorPayload() (*TransporterMessagePayloadError, error) {
+	offset, errorCode, err := m.readInt(0)
 	if err != nil {
 		return nil, err
 	}
-	_, errorMessage, err := message.readString(offset)
+	_, errorMessage, err := m.readString(offset)
 	if err != nil {
 		return nil, err
 	}
@@ -26,16 +26,16 @@ func (message *TransporterMessage) GetErrorPayload() (*TransporterMessagePayload
 	}, nil
 }
 
-func (message *TransporterMessage) SetErrorPayload(data *TransporterMessagePayloadError) error {
-	offset, err := message.writeInt(0, data.ErrorCode)
+func (m *TransporterMessage) SetErrorPayload(data *TransporterMessagePayloadError) error {
+	offset, err := m.writeInt(0, data.ErrorCode)
 	if err != nil {
 		return err
 	}
-	payloadLength, err := message.writeString(offset, data.ErrorMessage)
+	payloadLength, err := m.writeString(offset, data.ErrorMessage)
 	if err != nil {
 		return err
 	}
-	message.updatePayloadMetadata(payloadLength)
+	m.updatePayloadMetadata(payloadLength)
 	return nil
 }
 
@@ -47,8 +47,8 @@ type TransporterMessagePayloadConnect struct {
 	ProtocolVersion uint32
 }
 
-func (message *TransporterMessage) GetPayloadConnect() (*TransporterMessagePayloadConnect, error) {
-	_, protocolVersion, err := message.readInt(0)
+func (m *TransporterMessage) GetPayloadConnect() (*TransporterMessagePayloadConnect, error) {
+	_, protocolVersion, err := m.readInt(0)
 	if err != nil {
 		return nil, err
 	}
@@ -57,12 +57,12 @@ func (message *TransporterMessage) GetPayloadConnect() (*TransporterMessagePaylo
 	}, nil
 }
 
-func (message *TransporterMessage) SetPayloadConnect(data *TransporterMessagePayloadConnect) error {
-	payloadLength, err := message.writeInt(0, int(data.ProtocolVersion))
+func (m *TransporterMessage) SetPayloadConnect(data *TransporterMessagePayloadConnect) error {
+	payloadLength, err := m.writeInt(0, int(data.ProtocolVersion))
 	if err != nil {
 		return err
 	}
-	message.updatePayloadMetadata(payloadLength)
+	m.updatePayloadMetadata(payloadLength)
 	return nil
 }
 
@@ -73,8 +73,8 @@ type TransporterMessagePayloadConnectResponse struct {
 	ClientId string
 }
 
-func (message *TransporterMessage) GetPayloadConnectResponse() (*TransporterMessagePayloadConnectResponse, error) {
-	_, clientId, err := message.readString(0)
+func (m *TransporterMessage) GetPayloadConnectResponse() (*TransporterMessagePayloadConnectResponse, error) {
+	_, clientId, err := m.readString(0)
 	if err != nil {
 		return nil, err
 	}
@@ -82,12 +82,12 @@ func (message *TransporterMessage) GetPayloadConnectResponse() (*TransporterMess
 		ClientId: clientId,
 	}, nil
 }
-func (message *TransporterMessage) SetPayloadConnectResponse(data *TransporterMessagePayloadConnectResponse) error {
-	payloadLength, err := message.writeString(0, data.ClientId)
+func (m *TransporterMessage) SetPayloadConnectResponse(data *TransporterMessagePayloadConnectResponse) error {
+	payloadLength, err := m.writeString(0, data.ClientId)
 	if err != nil {
 		return err
 	}
-	message.updatePayloadMetadata(payloadLength)
+	m.updatePayloadMetadata(payloadLength)
 	return nil
 }
 
@@ -98,8 +98,8 @@ type TransporterMessagePayloadCreateRoomResponse struct {
 	RoomId string
 }
 
-func (message *TransporterMessage) GetPayloadCreateRoomResponse() (*TransporterMessagePayloadCreateRoomResponse, error) {
-	_, roomId, err := message.readString(0)
+func (m *TransporterMessage) GetPayloadCreateRoomResponse() (*TransporterMessagePayloadCreateRoomResponse, error) {
+	_, roomId, err := m.readString(0)
 	if err != nil {
 		return nil, err
 	}
@@ -108,12 +108,12 @@ func (message *TransporterMessage) GetPayloadCreateRoomResponse() (*TransporterM
 	}, nil
 }
 
-func (message *TransporterMessage) SetPayloadCreateRoomResponse(data *TransporterMessagePayloadCreateRoomResponse) error {
-	payloadLength, err := message.writeString(0, data.RoomId)
+func (m *TransporterMessage) SetPayloadCreateRoomResponse(data *TransporterMessagePayloadCreateRoomResponse) error {
+	payloadLength, err := m.writeString(0, data.RoomId)
 	if err != nil {
 		return err
 	}
-	message.updatePayloadMetadata(payloadLength)
+	m.updatePayloadMetadata(payloadLength)
 	return nil
 }
 
@@ -125,25 +125,25 @@ type TransporterMessagePayloadConnectRoom struct {
 	ClientId string
 }
 
-func (message *TransporterMessage) GetPayloadConnectRoom() (*TransporterMessagePayloadConnectRoom, error) {
-	offset, roomId, err := message.readString(0)
+func (m *TransporterMessage) GetPayloadConnectRoom() (*TransporterMessagePayloadConnectRoom, error) {
+	offset, roomId, err := m.readString(0)
 	if err != nil {
 		return nil, err
 	}
-	_, clientId, err := message.readString(offset)
+	_, clientId, err := m.readString(offset)
 	return &TransporterMessagePayloadConnectRoom{
 		RoomId:   roomId,
 		ClientId: clientId,
 	}, nil
 }
 
-func (message *TransporterMessage) SetPayloadConnectRoom(data *TransporterMessagePayloadConnectRoom) error {
-	offset, err := message.writeString(0, data.RoomId)
+func (m *TransporterMessage) SetPayloadConnectRoom(data *TransporterMessagePayloadConnectRoom) error {
+	offset, err := m.writeString(0, data.RoomId)
 	if err != nil {
 		return err
 	}
-	payloadLength, err := message.writeString(offset, data.ClientId)
-	message.updatePayloadMetadata(payloadLength)
+	payloadLength, err := m.writeString(offset, data.ClientId)
+	m.updatePayloadMetadata(payloadLength)
 	return nil
 }
 
@@ -154,8 +154,8 @@ type TransporterMessagePayloadConnectRoomResult struct {
 	Accepted int //0 = false, anything else true
 }
 
-func (message *TransporterMessage) GetPayloadConnectRoomResult() (*TransporterMessagePayloadConnectRoomResult, error) {
-	_, accepted, err := message.readInt(0)
+func (m *TransporterMessage) GetPayloadConnectRoomResponse() (*TransporterMessagePayloadConnectRoomResult, error) {
+	_, accepted, err := m.readInt(0)
 	if err != nil {
 		return nil, err
 	}
@@ -164,69 +164,69 @@ func (message *TransporterMessage) GetPayloadConnectRoomResult() (*TransporterMe
 	}, nil
 }
 
-func (message *TransporterMessage) SetPayloadConnectRoomResult(data *TransporterMessagePayloadConnectRoomResult) error {
-	payloadLength, err := message.writeInt(0, data.Accepted)
+func (m *TransporterMessage) SetPayloadConnectRoomResult(data *TransporterMessagePayloadConnectRoomResult) error {
+	payloadLength, err := m.writeInt(0, data.Accepted)
 	if err != nil {
 		return err
 	}
-	message.updatePayloadMetadata(payloadLength)
+	m.updatePayloadMetadata(payloadLength)
 	return nil
 }
 
 //endregion
 
 // region Util functions
-func (message *TransporterMessage) writeInt(offset uint32, value int) (uint32, error) {
+func (m *TransporterMessage) writeInt(offset uint32, value int) (uint32, error) {
 	typeSize := uint32(4)
 	newOffset := offset + typeSize
-	if uint32(len(message.payloadBuffer)) < newOffset {
-		return 0, fmt.Errorf("not enough space in the payload buffer, size: %d, offset: %d", len(message.payloadBuffer), newOffset)
+	if uint32(len(m.payloadBuffer)) < newOffset {
+		return 0, fmt.Errorf("not enough space in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), newOffset)
 	}
-	ByteOrder.PutUint32(message.payloadBuffer[offset:typeSize], uint32(value))
+	ByteOrder.PutUint32(m.payloadBuffer[offset:typeSize], uint32(value))
 	return newOffset, nil
 }
 
-func (message *TransporterMessage) writeString(offset uint32, value string) (uint32, error) {
+func (m *TransporterMessage) writeString(offset uint32, value string) (uint32, error) {
 	lengthTypeSize := uint32(4)
 	valueBytes := []byte(value)
 	newOffset := offset + lengthTypeSize + uint32(len(valueBytes))
-	if uint32(len(message.payloadBuffer)) < newOffset {
-		return 0, fmt.Errorf("not enough space in the payload buffer, size: %d, offset: %d", len(message.payloadBuffer), newOffset)
+	if uint32(len(m.payloadBuffer)) < newOffset {
+		return 0, fmt.Errorf("not enough space in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), newOffset)
 	}
-	ByteOrder.PutUint32(message.payloadBuffer[offset:lengthTypeSize], uint32(len(valueBytes)))
-	copy(message.payloadBuffer[offset+lengthTypeSize:], valueBytes)
+	ByteOrder.PutUint32(m.payloadBuffer[offset:lengthTypeSize], uint32(len(valueBytes)))
+	copy(m.payloadBuffer[offset+lengthTypeSize:], valueBytes)
 	return newOffset, nil
 }
 
-func (message *TransporterMessage) readInt(offset uint32) (uint32, int, error) {
+func (m *TransporterMessage) readInt(offset uint32) (uint32, int, error) {
 	typeSize := uint32(4)
-	if uint32(len(message.payloadBuffer)) < typeSize+offset {
-		return 0, 0, fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", len(message.payloadBuffer), typeSize+offset)
+	if uint32(len(m.payloadBuffer)) < typeSize+offset {
+		return 0, 0, fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), typeSize+offset)
 	}
-	value := ByteOrder.Uint32(message.payloadBuffer[offset:typeSize])
+	value := ByteOrder.Uint32(m.payloadBuffer[offset:typeSize])
 	return offset + typeSize, int(value), nil
 }
 
-func (message *TransporterMessage) readString(offset uint32) (uint32, string, error) {
+func (m *TransporterMessage) readString(offset uint32) (uint32, string, error) {
 	lengthTypeSize := uint32(4)
 	newOffset := offset + lengthTypeSize
-	if uint32(len(message.payloadBuffer)) < newOffset {
-		return 0, "", fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", len(message.payloadBuffer), newOffset)
+	if uint32(len(m.payloadBuffer)) < newOffset {
+		return 0, "", fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), newOffset)
 	}
-	length := ByteOrder.Uint32(message.payloadBuffer[offset:lengthTypeSize])
+	length := ByteOrder.Uint32(m.payloadBuffer[offset:lengthTypeSize])
 	newOffset += length
-	if uint32(len(message.payloadBuffer)) < newOffset {
-		return 0, "", fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", len(message.payloadBuffer), newOffset)
+	if uint32(len(m.payloadBuffer)) < newOffset {
+		return 0, "", fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), newOffset)
 	}
 	offset += lengthTypeSize
-	value := string(message.payloadBuffer[offset : offset+length])
+	value := string(m.payloadBuffer[offset : offset+length])
 	return newOffset, value, nil
 }
 
-func (message *TransporterMessage) updatePayloadMetadata(payloadLength uint32) {
-	targetBuffer := message.payloadBuffer[:payloadLength]
-	ByteOrder.PutUint32(message.payloadLengthBuffer, payloadLength)
-	ByteOrder.PutUint32(message.payloadCrc32Buffer, crc32.ChecksumIEEE(targetBuffer))
+func (m *TransporterMessage) updatePayloadMetadata(payloadLength uint32) {
+	targetBuffer := m.payloadBuffer[:payloadLength]
+	ByteOrder.PutUint32(m.payloadLengthBuffer, payloadLength)
+	ByteOrder.PutUint32(m.payloadCrc32Buffer, crc32.ChecksumIEEE(targetBuffer))
 }
 
 //endregion

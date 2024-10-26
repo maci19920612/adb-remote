@@ -1,11 +1,13 @@
 package transportLayer
 
 import (
+	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/config"
 	"adb-remote.maci.team/shared"
 	"adb-remote.maci.team/shared/protocol"
 	"context"
 	"fmt"
+	"hash/crc32"
 	"log/slog"
 	"net"
 )
@@ -167,4 +169,27 @@ func (c *Client) SendJoinRoomResponse(isAccepted int) error {
 	}
 	err = m.Write(c.connection)
 	return err
+}
+
+func (c *Client) SendAdbMessage(message *adb.AdbMessage) error {
+	var err error
+	logger := c.Logger
+	mPool := c.TransporterMessagePool
+	transportMessage := mPool.Obtain()
+	defer mPool.Release(transportMessage)
+
+	length := message.DataLength() + adb.HeaderSize
+	checksum := crc32.ChecksumIEEE(message.Data()[:length])
+
+	logger.Info("Sending ADB message to transport")
+	transportMessage.SetHeader(protocol.CommandAdbTransport, length, checksum)
+	err = transportMessage.WriteHeader(c.connection)
+	if err != nil {
+		return err
+	}
+	err = message.Write(c.connection)
+	if err != nil {
+		return err
+	}
+	return nil
 }
