@@ -2,6 +2,7 @@ package command
 
 import (
 	"adb-remote.maci.team/client/config"
+	"adb-remote.maci.team/client/controller"
 	"adb-remote.maci.team/client/transportLayer"
 	"flag"
 	"fmt"
@@ -17,6 +18,8 @@ func CreateShareCommand(logger *slog.Logger, client *transportLayer.Client, conf
 				return InvalidCommandArgumentType
 			}
 			fmt.Printf("Target device: %s\n", *typedArgs.TargetDevice)
+			controller.Handshake(client)
+			controller.JoinAsRoomOwner(client, *typedArgs.TargetDevice)
 			return nil
 		},
 		ParameterFactory: func() (BaseCommand, error) {
