@@ -13,6 +13,7 @@ import (
 func CreateConnectCommand(
 	logger *slog.Logger,
 	client *transportLayer.Client,
+	smartSocket adb.IAdbSmartSocket,
 	config *config.ClientConfiguration,
 ) *Command[BaseCommand] {
 	return &Command[BaseCommand]{
@@ -22,7 +23,7 @@ func CreateConnectCommand(
 			if !ok {
 				return InvalidCommandArgumentType
 			}
-			return tui.RunConnect(context.Background(), client, *typedArgs.TargetRoomId, *typedArgs.LocalPort)
+			return tui.RunConnect(context.Background(), client, smartSocket, *typedArgs.TargetRoomId, *typedArgs.LocalPort)
 		},
 		ParameterFactory: func() (BaseCommand, error) {
 			flagSet := flag.NewFlagSet("connect", flag.ExitOnError)
@@ -38,9 +39,10 @@ func CreateConnectCommand(
 		},
 
 		//Dependencies
-		Logger: logger,
-		Client: client,
-		Config: config,
+		Logger:      logger,
+		Client:      client,
+		Config:      config,
+		SmartSocket: smartSocket,
 	}
 }
 

@@ -20,6 +20,7 @@ const maxSmartSocketResponseSize = 1024 * 1024
 
 type IAdbSmartSocket interface {
 	Connect(targetSerial string) error
+	Disconnect(targetSerial string) error
 	DeviceList() ([]Device, error)
 	// Transport returns a connection already inside "transport mode" for
 	// targetSerial. Real adb-server does not expose a raw ADB
@@ -122,6 +123,14 @@ func (ss *AdbSmartSocket) Connect(targetSerial string) error {
 	logger := ss.logger
 	logger.Info(fmt.Sprintf("Connect called with targetSerial: %s", targetSerial))
 	command := fmt.Sprintf("host:connect:%s", targetSerial)
+	_, err := ss.executeCommand(command)
+	return err
+}
+
+func (ss *AdbSmartSocket) Disconnect(targetSerial string) error {
+	logger := ss.logger
+	logger.Info(fmt.Sprintf("Disconnect called with targetSerial: %s", targetSerial))
+	command := fmt.Sprintf("host:disconnect:%s", targetSerial)
 	_, err := ss.executeCommand(command)
 	return err
 }

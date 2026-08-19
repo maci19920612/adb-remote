@@ -113,12 +113,46 @@ func freeLocalPort(t *testing.T) string {
 	return port
 }
 
+// fakeGuestSmartSocket records Connect/Disconnect calls so tests can assert
+// JoinAsGuest drives the automatic "adb connect"/"adb disconnect" lifecycle
+// correctly.
+type fakeGuestSmartSocket struct {
+	adb.IAdbSmartSocket
+
+	mu              sync.Mutex
+	connectCalls    []string
+	disconnectCalls []string
+	connectErr      error
+	disconnectErr   error
+}
+
+func (f *fakeGuestSmartSocket) Connect(targetSerial string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.connectCalls = append(f.connectCalls, targetSerial)
+	return f.connectErr
+}
+
+func (f *fakeGuestSmartSocket) Disconnect(targetSerial string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.disconnectCalls = append(f.disconnectCalls, targetSerial)
+	return f.disconnectErr
+}
+
+func (f *fakeGuestSmartSocket) calls() (connect []string, disconnect []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.connectCalls...), append([]string{}, f.disconnectCalls...)
+}
+
 // TestJoinAsGuestRelaysAdbTraffic exercises the full guest-side path: join a
 // room, stand up the local AdbProxy, and confirm ADB traffic is relayed in
 // both directions once a local "adb server" connects.
 func TestJoinAsGuestRelaysAdbTraffic(t *testing.T) {
 	client, server := newConnectedClient(t)
 	port := freeLocalPort(t)
+	smartSocket := &fakeGuestSmartSocket{}
 
 	var events []GuestEvent
 	var eventsMu sync.Mutex
@@ -130,7 +164,7 @@ func TestJoinAsGuestRelaysAdbTraffic(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- JoinAsGuest(ctx, client, "ROOM1", port, onEvent) }()
+	go func() { done <- JoinAsGuest(ctx, client, smartSocket, "ROOM1", port, onEvent) }()
 
 	respondToJoinRoom(t, server, 1)
 
@@ -216,7 +250,7 @@ func TestJoinAsGuestRelaysAdbTraffic(t *testing.T) {
 		gotKinds[i] = e.Kind
 	}
 	eventsMu.Unlock()
-	wantKinds := []GuestEventKind{GuestJoinDecided, GuestProxyReady, GuestLocalAdbConnected}
+	wantKinds := []GuestEventKind{GuestJoinDecided, GuestProxyReady, GuestAdbConnected, GuestLocalAdbConnected}
 	if len(gotKinds) < len(wantKinds) {
 		t.Fatalf("expected at least %v, got %v", wantKinds, gotKinds)
 	}
@@ -224,6 +258,14 @@ func TestJoinAsGuestRelaysAdbTraffic(t *testing.T) {
 		if gotKinds[i] != want {
 			t.Fatalf("expected event #%d to be %v, got %v (all: %v)", i, want, gotKinds[i], gotKinds)
 		}
+	}
+
+	// JoinAsGuest must have run the automatic "adb connect" against its own
+	// proxy address, so the operator never has to run it by hand.
+	connectCalls, _ := smartSocket.calls()
+	wantAddress := "127.0.0.1:" + port
+	if len(connectCalls) != 1 || connectCalls[0] != wantAddress {
+		t.Fatalf("expected exactly one Connect(%q) call, got %v", wantAddress, connectCalls)
 	}
 
 	cancel()
@@ -234,5 +276,48 @@ func TestJoinAsGuestRelaysAdbTraffic(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("JoinAsGuest did not stop after context cancellation")
+	}
+
+	// And symmetrically disconnect once JoinAsGuest returns, so a stale
+	// entry doesn't linger in `adb devices`.
+	_, disconnectCalls := smartSocket.calls()
+	if len(disconnectCalls) != 1 || disconnectCalls[0] != wantAddress {
+		t.Fatalf("expected exactly one Disconnect(%q) call after shutdown, got %v", wantAddress, disconnectCalls)
+	}
+}
+
+// TestJoinAsGuestReportsAutomaticAdbConnectFailure verifies that a failure
+// running the automatic "adb connect" is reported as an event (so the
+// operator can fall back to running it manually) rather than aborting
+// JoinAsGuest entirely — relaying should still work once a local adb server
+// connects some other way.
+func TestJoinAsGuestReportsAutomaticAdbConnectFailure(t *testing.T) {
+	client, server := newConnectedClient(t)
+	port := freeLocalPort(t)
+	connectErr := errors.New("adb-server unreachable")
+	smartSocket := &fakeGuestSmartSocket{connectErr: connectErr}
+
+	events := make(chan GuestEvent, 10)
+	onEvent := func(e GuestEvent) { events <- e }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- JoinAsGuest(ctx, client, smartSocket, "ROOM1", port, onEvent) }()
+
+	respondToJoinRoom(t, server, 1)
+
+	for {
+		select {
+		case e := <-events:
+			if e.Kind == GuestAdbConnectFailed {
+				if !errors.Is(e.Err, connectErr) {
+					t.Fatalf("expected the Connect error to be reported, got %v", e.Err)
+				}
+				return
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for GuestAdbConnectFailed")
+		}
 	}
 }

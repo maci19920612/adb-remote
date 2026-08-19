@@ -19,10 +19,16 @@ func (e *ErrJoinRoomDenied) Error() string {
 
 // JoinAsGuest joins roomId as a guest, then starts a local AdbProxy on
 // localPort and relays ADB protocol traffic between it and the room owner
-// until ctx is cancelled or the proxy fails to start. State changes are
-// reported through onEvent; all presentation is the caller's
-// responsibility.
-func JoinAsGuest(ctx context.Context, client *transportLayer.Client, roomId string, localPort string, onEvent GuestEventFunc) error {
+// until ctx is cancelled or the proxy fails to start. Once the proxy is
+// listening, it runs "adb connect" against it automatically (via
+// smartSocket, the same smartsocket protocol the real adb CLI uses — no
+// external process involved) so the local adb server picks up the shared
+// device without the operator having to run it by hand, and "adb
+// disconnect" symmetrically as JoinAsGuest returns for any reason, so a
+// stale entry doesn't linger in `adb devices` after this process exits.
+// State changes are reported through onEvent; all presentation is the
+// caller's responsibility.
+func JoinAsGuest(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, roomId string, localPort string, onEvent GuestEventFunc) error {
 	if err := roomJoinStep(client, roomId, onEvent); err != nil {
 		return err
 	}
@@ -35,6 +41,22 @@ func JoinAsGuest(ctx context.Context, client *transportLayer.Client, roomId stri
 	defer proxy.Stop()
 
 	emitGuest(onEvent, GuestEvent{Kind: GuestProxyReady, LocalPort: localPort})
+
+	proxyAddress := fmt.Sprintf("127.0.0.1:%s", localPort)
+	if err := smartSocket.Connect(proxyAddress); err != nil {
+		logger.Error(fmt.Sprintf("Automatic \"adb connect %s\" failed: %s", proxyAddress, err))
+		emitGuest(onEvent, GuestEvent{Kind: GuestAdbConnectFailed, Err: err})
+	} else {
+		logger.Info(fmt.Sprintf("Automatic \"adb connect %s\" succeeded", proxyAddress))
+		emitGuest(onEvent, GuestEvent{Kind: GuestAdbConnected})
+		defer func() {
+			if err := smartSocket.Disconnect(proxyAddress); err != nil {
+				logger.Error(fmt.Sprintf("Automatic \"adb disconnect %s\" failed: %s", proxyAddress, err))
+			} else {
+				logger.Info(fmt.Sprintf("Automatic \"adb disconnect %s\" succeeded", proxyAddress))
+			}
+		}()
+	}
 
 	for {
 		select {

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/controller"
 	"adb-remote.maci.team/client/transportLayer"
 	"context"
@@ -34,29 +35,41 @@ type connectModel struct {
 	clientId string
 	err      error
 
+	adbConnected  bool
+	adbConnectErr error
+
 	relayCount   int
 	lastRelayErr error
 }
 
-// RunConnect runs the interactive connect TUI to completion.
-func RunConnect(ctx context.Context, client *transportLayer.Client, roomId string, localPort string) error {
+// RunConnect runs the interactive connect TUI to completion. It does not
+// return until the background guest flow (including its "adb disconnect"
+// cleanup) has fully stopped, so callers can rely on cleanup having
+// happened by the time this returns.
+func RunConnect(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, roomId string, localPort string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	m := &connectModel{roomId: roomId, localPort: localPort, stage: connectStageConnecting}
 	program := tea.NewProgram(m)
 
-	go runGuestFlow(ctx, program, client, roomId, localPort)
+	guestFlowDone := make(chan struct{})
+	go func() {
+		defer close(guestFlowDone)
+		runGuestFlow(ctx, program, client, smartSocket, roomId, localPort)
+	}()
 
 	_, err := program.Run()
 	cancel()
+	<-guestFlowDone // let cleanup (e.g. the automatic "adb disconnect") finish before returning
+
 	if err != nil {
 		return err
 	}
 	return m.err
 }
 
-func runGuestFlow(ctx context.Context, program *tea.Program, client *transportLayer.Client, roomId string, localPort string) {
+func runGuestFlow(ctx context.Context, program *tea.Program, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, roomId string, localPort string) {
 	clientId, err := controller.Handshake(client)
 	if err != nil {
 		program.Send(connectErrorMsg{err})
@@ -69,7 +82,7 @@ func runGuestFlow(ctx context.Context, program *tea.Program, client *transportLa
 		program.Send(guestEventMsg(e))
 	}
 
-	err = controller.JoinAsGuest(ctx, client, roomId, localPort, onEvent)
+	err = controller.JoinAsGuest(ctx, client, smartSocket, roomId, localPort, onEvent)
 	if err == nil || ctx.Err() != nil {
 		return
 	}
@@ -123,6 +136,12 @@ func (m *connectModel) handleGuestEvent(e controller.GuestEvent) {
 	case controller.GuestProxyReady:
 		m.stage = connectStageReady
 		m.localPort = e.LocalPort
+	case controller.GuestAdbConnected:
+		m.adbConnected = true
+		m.adbConnectErr = nil
+	case controller.GuestAdbConnectFailed:
+		m.adbConnected = false
+		m.adbConnectErr = e.Err
 	case controller.GuestLocalAdbConnected:
 		m.stage = connectStageRelaying
 		m.relayCount++
@@ -144,7 +163,15 @@ func (m *connectModel) View() string {
 
 	switch m.stage {
 	case connectStageReady, connectStageRelaying:
-		b.WriteString(fmt.Sprintf("Point your local adb at it with:\n  adb connect 127.0.0.1:%s\n\n", m.localPort))
+		b.WriteString(fmt.Sprintf("Local proxy: 127.0.0.1:%s\n", m.localPort))
+		if m.adbConnected {
+			b.WriteString(successStyle.Render("adb connect issued automatically") + "\n\n")
+		} else if m.adbConnectErr != nil {
+			b.WriteString(errorStyle.Render(fmt.Sprintf("Automatic \"adb connect\" failed: %s", m.adbConnectErr)) + "\n")
+			b.WriteString(dimStyle.Render(fmt.Sprintf("Run it yourself: adb connect 127.0.0.1:%s", m.localPort)) + "\n\n")
+		} else {
+			b.WriteString("\n")
+		}
 		if m.relayCount > 0 {
 			b.WriteString(dimStyle.Render(fmt.Sprintf("(%d local adb connection(s) relayed so far)", m.relayCount)) + "\n\n")
 		}

@@ -91,6 +91,32 @@ func TestConnectModelRelayStoppedGoesBackToReady(t *testing.T) {
 	}
 }
 
+func TestConnectModelAutomaticAdbConnected(t *testing.T) {
+	m := newTestConnectModel()
+	updated, _ := m.Update(guestEventMsg{Kind: controller.GuestAdbConnected})
+	cm := updated.(*connectModel)
+	if !cm.adbConnected {
+		t.Fatalf("expected adbConnected to be true")
+	}
+	if cm.adbConnectErr != nil {
+		t.Fatalf("expected no adbConnectErr, got %v", cm.adbConnectErr)
+	}
+}
+
+func TestConnectModelAutomaticAdbConnectFailed(t *testing.T) {
+	m := newTestConnectModel()
+	m.adbConnected = true // simulate a stale prior success before a later failure
+	wantErr := errors.New("adb-server unreachable")
+	updated, _ := m.Update(guestEventMsg{Kind: controller.GuestAdbConnectFailed, Err: wantErr})
+	cm := updated.(*connectModel)
+	if cm.adbConnected {
+		t.Fatalf("expected adbConnected to be reset to false on failure")
+	}
+	if cm.adbConnectErr != wantErr {
+		t.Fatalf("expected adbConnectErr %v, got %v", wantErr, cm.adbConnectErr)
+	}
+}
+
 func TestConnectModelErrorStage(t *testing.T) {
 	m := newTestConnectModel()
 	wantErr := errors.New("transporter connection lost")

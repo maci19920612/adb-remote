@@ -56,6 +56,12 @@ const (
 	// shutdown). JoinAsGuest goes back to waiting for a new local
 	// connection afterward, unless ctx was cancelled.
 	GuestRelayStopped
+	// GuestAdbConnected reports that JoinAsGuest ran "adb connect" against
+	// the local proxy automatically (Err is nil).
+	GuestAdbConnected
+	// GuestAdbConnectFailed reports that the automatic "adb connect"
+	// failed (Err is the reason); the operator can still run it manually.
+	GuestAdbConnectFailed
 )
 
 // GuestEvent is emitted by JoinAsGuest to report state changes as they

@@ -179,6 +179,38 @@ func TestConnectFailurePropagatesServerError(t *testing.T) {
 	}
 }
 
+func TestDisconnectSuccess(t *testing.T) {
+	address := fakeAdbServer(t, func(command string, conn net.Conn) {
+		if command != "host:disconnect:127.0.0.1:5038" {
+			t.Errorf("unexpected command: %q", command)
+		}
+		writeSmartSocketResponse(conn, "disconnected 127.0.0.1:5038")
+	})
+
+	socket := newTestSmartSocket(address)
+	if err := socket.Disconnect("127.0.0.1:5038"); err != nil {
+		t.Fatalf("Disconnect failed: %s", err)
+	}
+}
+
+func TestDisconnectFailurePropagatesServerError(t *testing.T) {
+	address := fakeAdbServer(t, func(command string, conn net.Conn) {
+		_, _ = conn.Write([]byte("FAIL"))
+		body := "no such device"
+		_, _ = conn.Write([]byte(fmt.Sprintf("%04x", len(body))))
+		_, _ = conn.Write([]byte(body))
+	})
+
+	socket := newTestSmartSocket(address)
+	err := socket.Disconnect("127.0.0.1:5038")
+	if err == nil {
+		t.Fatalf("expected an error from Disconnect")
+	}
+	if err.Error() != "no such device" {
+		t.Fatalf("expected the server error message to propagate, got: %s", err)
+	}
+}
+
 func TestTransportReturnsConnectionOnSuccess(t *testing.T) {
 	address := fakeAdbServer(t, func(command string, conn net.Conn) {
 		if command != "host:transport:emulator-5554" {
