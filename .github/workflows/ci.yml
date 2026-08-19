@@ -1,0 +1,126 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.module }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [shared, client, transporter]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+
+      - name: gofmt check
+        working-directory: ${{ matrix.module }}
+        run: |
+          fmt_out="$(gofmt -l .)"
+          if [ -n "$fmt_out" ]; then
+            echo "The following files are not gofmt'd:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: go vet
+        working-directory: ${{ matrix.module }}
+        run: go vet ./...
+
+      - name: go test
+        working-directory: ${{ matrix.module }}
+        run: go test ./... -race -count=1 -timeout 180s
+
+  # Builds release binaries for the major desktop platforms. Only runs for
+  # version tags (v1.2.3), and only once every "test" matrix leg has passed.
+  release:
+    name: release (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.work
+
+      - name: Build binaries
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: 0
+        run: |
+          set -e
+          ext=""
+          if [ "$GOOS" = "windows" ]; then ext=".exe"; fi
+
+          mkdir -p dist/adb-remote-client dist/adb-remote-transporter
+
+          go -C client build -o ../dist/adb-remote-client/adb-remote-client${ext} .
+          go -C transporter build -o ../dist/adb-remote-transporter/adb-remote-transporter${ext} .
+
+          cp client/config.example.json dist/adb-remote-client/config.json
+
+      - name: Package archives
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -e
+          cd dist
+          if [ "$GOOS" = "windows" ]; then
+            zip -r "adb-remote-client_${GOOS}_${GOARCH}.zip" adb-remote-client
+            zip -r "adb-remote-transporter_${GOOS}_${GOARCH}.zip" adb-remote-transporter
+          else
+            tar czf "adb-remote-client_${GOOS}_${GOARCH}.tar.gz" adb-remote-client
+            tar czf "adb-remote-transporter_${GOOS}_${GOARCH}.tar.gz" adb-remote-transporter
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: adb-remote_${{ matrix.goos }}_${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+
+  publish:
+    name: publish release
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          draft: false
+          generate_release_notes: true
