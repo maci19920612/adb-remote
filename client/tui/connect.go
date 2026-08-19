@@ -4,6 +4,7 @@ import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/controller"
 	"adb-remote.maci.team/client/identity"
+	"adb-remote.maci.team/client/relay"
 	"adb-remote.maci.team/client/transportLayer"
 	"context"
 	"errors"
@@ -22,6 +23,7 @@ const (
 	connectStageProxyStarting
 	connectStageReady
 	connectStageRelaying
+	connectStageDisconnected
 	connectStageError
 )
 
@@ -98,6 +100,10 @@ func runGuestFlow(ctx context.Context, program *tea.Program, client *transportLa
 		// Already reflected via a GuestJoinDecided{Accepted:false} event.
 		return
 	}
+	if errors.Is(err, relay.ErrTransportClosed) {
+		// Already reflected via a GuestTransportLost event.
+		return
+	}
 	program.Send(connectErrorMsg{err})
 }
 
@@ -157,6 +163,8 @@ func (m *connectModel) handleGuestEvent(e controller.GuestEvent) {
 	case controller.GuestRelayStopped:
 		m.lastRelayErr = e.Err
 		m.stage = connectStageReady
+	case controller.GuestTransportLost:
+		m.stage = connectStageDisconnected
 	}
 }
 
@@ -195,6 +203,8 @@ func (m *connectModel) View() string {
 		}
 	case connectStageDenied:
 		b.WriteString(errorStyle.Render("The room owner declined the join request.") + "\n\n")
+	case connectStageDisconnected:
+		b.WriteString(errorStyle.Render("Disconnected: the room owner left, or the transporter connection was lost.") + "\n\n")
 	case connectStageError:
 		b.WriteString(errorStyle.Render(fmt.Sprintf("Error: %s", m.err)) + "\n\n")
 	}
@@ -217,6 +227,8 @@ func (m *connectModel) stateLine() string {
 		return successStyle.Render("ready — waiting for a local adb connection")
 	case connectStageRelaying:
 		return successStyle.Render("relaying ADB traffic")
+	case connectStageDisconnected:
+		return errorStyle.Render("disconnected")
 	case connectStageError:
 		return errorStyle.Render("error")
 	default:

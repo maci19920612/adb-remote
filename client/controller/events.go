@@ -15,6 +15,10 @@ const (
 	// OwnerJoinFailed reports that handling a join request itself failed
 	// (bad payload, promptAccept error, or the response couldn't be sent).
 	OwnerJoinFailed
+	// OwnerGuestLeft reports that the previously-connected guest
+	// disconnected from the room. The owner's own transporter connection is
+	// unaffected; a new guest can still join.
+	OwnerGuestLeft
 )
 
 // OwnerEvent is emitted by JoinAsRoomOwner to report state changes as they
@@ -65,6 +69,11 @@ const (
 	// GuestAdbConnectFailed reports that the automatic "adb connect"
 	// failed (Err is the reason); the operator can still run it manually.
 	GuestAdbConnectFailed
+	// GuestTransportLost reports that the connection to the transporter
+	// (and so to the room owner) was lost, either because the owner
+	// disconnected or the transporter itself went away. JoinAsGuest returns
+	// shortly after emitting this.
+	GuestTransportLost
 )
 
 // GuestEvent is emitted by JoinAsGuest to report state changes as they

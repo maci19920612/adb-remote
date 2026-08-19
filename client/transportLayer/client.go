@@ -81,9 +81,14 @@ func (c *Client) Start() error {
 	return nil
 }
 
+// startReader is the sole sender on messageChannel, so it alone is
+// responsible for closing it once reading stops for any reason (read error,
+// a broken pool, or ctx cancellation) — this is how Messages() consumers
+// learn the connection is gone, rather than blocking forever.
 func (c *Client) startReader(ctx context.Context) {
 	log := c.Logger
 	pool := c.transporterMessagePool
+	defer close(c.messageChannel)
 	for {
 		if ctx.Err() != nil {
 			log.Info("Connection reader cancelled")

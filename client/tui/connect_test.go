@@ -117,6 +117,16 @@ func TestConnectModelAutomaticAdbConnectFailed(t *testing.T) {
 	}
 }
 
+func TestConnectModelTransportLost(t *testing.T) {
+	m := newTestConnectModel()
+	m.stage = connectStageRelaying
+	updated, _ := m.Update(guestEventMsg{Kind: controller.GuestTransportLost})
+	cm := updated.(*connectModel)
+	if cm.stage != connectStageDisconnected {
+		t.Fatalf("expected stage %v, got %v", connectStageDisconnected, cm.stage)
+	}
+}
+
 func TestConnectModelErrorStage(t *testing.T) {
 	m := newTestConnectModel()
 	wantErr := errors.New("transporter connection lost")

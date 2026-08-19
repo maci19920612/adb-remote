@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"sync"
 	"testing"
@@ -340,6 +341,80 @@ func TestJoinAsRoomOwnerRelaysAdbTraffic(t *testing.T) {
 	}
 	if clse.Arg1() != ownId || clse.Arg2() != 5 {
 		t.Fatalf("expected CLSE(%d, 5), got arg1=%d arg2=%d", ownId, clse.Arg1(), clse.Arg2())
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("JoinAsRoomOwner did not stop after context cancellation")
+	}
+}
+
+// TestJoinAsRoomOwnerHandlesGuestLeft is a regression test for the owner
+// having no other way to learn its guest disconnected mid-room: a
+// CommandGuestLeft notification must surface as an OwnerGuestLeft event and
+// close any streams still open for that guest (since only one guest is
+// ever active at a time, every open stream necessarily belonged to it).
+func TestJoinAsRoomOwnerHandlesGuestLeft(t *testing.T) {
+	client, server := newConnectedClient(t)
+	deviceConn, ownerSideConn := net.Pipe()
+	defer deviceConn.Close()
+	smartSocket := newFakeSmartSocket().withStream("shell,v2,raw:echo hi", ownerSideConn)
+
+	events := make(chan OwnerEvent, 10)
+	onEvent := func(e OwnerEvent) { events <- e }
+	ownerIdentity := testIdentity(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- JoinAsRoomOwner(ctx, client, smartSocket, "emulator-5554", ownerIdentity, func(clientId string, publicKey []byte) (bool, error) {
+			return true, nil
+		}, onEvent)
+	}()
+
+	respondToCreateRoom(t, server, "ROOM7")
+	expectOwnerEvent(t, events) // OwnerRoomCreated
+
+	sendJoinRoomRequest(t, server, "ROOM7", "GUEST1")
+	expectJoinResponse(t, server)
+	expectOwnerEvent(t, events) // OwnerJoinRequested
+	expectOwnerEvent(t, events) // OwnerJoinDecided
+
+	openMessage := adb.CreateMessage()
+	if err := openMessage.Set(adb.CommandOpen, 5, 0, []byte("shell,v2,raw:echo hi\x00")); err != nil {
+		t.Fatalf("Set failed: %s", err)
+	}
+	sendAdbTransport(t, server, openMessage)
+	expectAdbTransport(t, server) // OKAY acknowledging the open
+
+	guestLeft := protocol.CreateTransporterMessage()
+	guestLeft.SetDirectCommand(protocol.CommandGuestLeft)
+	if err := guestLeft.Write(server); err != nil {
+		t.Fatalf("failed to write the guest-left notification: %s", err)
+	}
+
+	event := expectOwnerEvent(t, events)
+	if event.Kind != OwnerGuestLeft {
+		t.Fatalf("expected OwnerGuestLeft, got %+v", event)
+	}
+
+	// The stream opened for the now-departed guest must have been closed.
+	_ = deviceConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buffer := make([]byte, 1)
+	if _, err := deviceConn.Read(buffer); err != io.EOF {
+		t.Fatalf("expected the device stream to be closed after the guest left, got err=%v", err)
+	}
+
+	// The owner's own connection must be unaffected: a new guest can join.
+	sendJoinRoomRequest(t, server, "ROOM7", "GUEST2")
+	if accepted := expectJoinResponse(t, server); accepted != 1 {
+		t.Fatalf("expected the owner to still accept a new guest after the previous one left, got Accepted=%d", accepted)
 	}
 
 	cancel()

@@ -268,6 +268,27 @@ func (m *shareModel) handleOwnerEvent(e controller.OwnerEvent) {
 		m.appendActivity(fmt.Sprintf("clientId %s: %s", e.GuestClientId, verb))
 	case controller.OwnerJoinFailed:
 		m.appendActivity(fmt.Sprintf("clientId %s: error handling join request: %s", e.GuestClientId, e.Err))
+	case controller.OwnerGuestLeft:
+		// Only one guest is ever active at a time, so whichever one we were
+		// tracking (connected, or still-pending a decision) is the one that
+		// left.
+		leftId := m.connectedGuestId
+		if leftId == "" {
+			leftId = m.pendingGuestId
+		}
+		m.appendActivity(fmt.Sprintf("clientId %s: disconnected", leftId))
+		m.connectedGuestId = ""
+		m.connectedGuestFingerprint = ""
+		if m.pendingRespond != nil {
+			// Unblock the goroutine waiting on this decision instead of
+			// leaking it for the rest of the session; the decision is moot
+			// now, and handleJoinRequest's resulting SendJoinRoomResponse
+			// is harmless — the transporter just reports the guest is gone.
+			m.pendingRespond <- false
+		}
+		m.pendingGuestId = ""
+		m.pendingFingerprint = ""
+		m.pendingRespond = nil
 	}
 }
 

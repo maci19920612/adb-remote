@@ -311,5 +311,8 @@ func (rm *RoomManager) handleClientDisconnected(client *connectionManager.Client
 		logger.Info(fmt.Sprintf("The disconnected client was the room (%s) guest, clearing the room: %p", targetRoom.roomId, client))
 		_ = targetRoom.guest.Close()
 		targetRoom.guest = nil
+		if err := targetRoom.owner.SendGuestLeft(); err != nil {
+			logger.Error(fmt.Sprintf("%p (%s): Failed to notify the owner that the guest left: %s", targetRoom.owner, targetRoom.owner.GetClientId(), err))
+		}
 	}
 }

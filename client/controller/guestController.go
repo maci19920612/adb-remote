@@ -7,6 +7,7 @@ import (
 	"adb-remote.maci.team/client/transportLayer"
 	"adb-remote.maci.team/shared/protocol"
 	"context"
+	"errors"
 	"fmt"
 )
 
@@ -63,12 +64,30 @@ func JoinAsGuest(ctx context.Context, client *transportLayer.Client, smartSocket
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case container, ok := <-client.Messages():
+			// While idle (no active relay), nothing should legitimately
+			// arrive here — the guest is always the one opening ADB
+			// streams. This case exists to notice the channel closing,
+			// meaning the connection to the transporter (and so to the
+			// room owner) is gone; anything else received is logged and
+			// discarded.
+			if !ok {
+				logger.Info("Transporter connection lost while idle")
+				emitGuest(onEvent, GuestEvent{Kind: GuestTransportLost})
+				return relay.ErrTransportClosed
+			}
+			logger.Info("Ignoring unexpected message while idle")
+			_ = container.Dispose()
 		case conn := <-proxy.Connections():
 			logger.Info("Local ADB server connected, starting the relay")
 			emitGuest(onEvent, GuestEvent{Kind: GuestLocalAdbConnected})
 			err := relay.Run(ctx, conn, client, logger)
 			logger.Info(fmt.Sprintf("Relay stopped: %s", err))
 			emitGuest(onEvent, GuestEvent{Kind: GuestRelayStopped, Err: err})
+			if errors.Is(err, relay.ErrTransportClosed) {
+				emitGuest(onEvent, GuestEvent{Kind: GuestTransportLost})
+				return err
+			}
 		}
 	}
 }
@@ -80,7 +99,10 @@ func roomJoinStep(client *transportLayer.Client, guestIdentity *identity.Identit
 		logger.Error(fmt.Sprintf("Failed to join room: %s, error: %s", roomId, err))
 		return err
 	}
-	container := <-client.Messages()
+	container, ok := <-client.Messages()
+	if !ok {
+		return relay.ErrTransportClosed
+	}
 	defer container.Dispose()
 	message, err := container.Data()
 	if err != nil {

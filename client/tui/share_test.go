@@ -164,6 +164,46 @@ func TestShareModelDoesNotTrackConnectedGuestOnDecline(t *testing.T) {
 	}
 }
 
+func TestShareModelClearsConnectedGuestOnGuestLeft(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	updated, _ := m.Update(ownerEventMsg{Kind: controller.OwnerJoinDecided, GuestClientId: "GUEST1", GuestPublicKey: []byte{1, 2, 3}, Accepted: true})
+	m = updated.(*shareModel)
+	if m.connectedGuestId != "GUEST1" {
+		t.Fatalf("expected GUEST1 to be recorded as connected first")
+	}
+
+	updated, _ = m.Update(ownerEventMsg{Kind: controller.OwnerGuestLeft})
+	m = updated.(*shareModel)
+	if m.connectedGuestId != "" || m.connectedGuestFingerprint != "" {
+		t.Fatalf("expected the connected guest to be cleared after it left, got %+v", m)
+	}
+	if len(m.activity) == 0 {
+		t.Fatalf("expected the guest leaving to be logged")
+	}
+}
+
+func TestShareModelGuestLeftClearsPendingPrompt(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m.stage = shareStageRoomActive
+	respond := make(chan bool, 1)
+	updated, _ := m.Update(joinRequestMsg{clientId: "GUEST1", fingerprint: "FP-GUEST", respond: respond})
+	m = updated.(*shareModel)
+
+	updated, _ = m.Update(ownerEventMsg{Kind: controller.OwnerGuestLeft})
+	m = updated.(*shareModel)
+	if m.pendingGuestId != "" || m.pendingRespond != nil {
+		t.Fatalf("expected the pending join prompt to be cleared when the guest left, got %+v", m)
+	}
+	select {
+	case accepted := <-respond:
+		if accepted {
+			t.Fatalf("expected the abandoned prompt to resolve to declined")
+		}
+	default:
+		t.Fatalf("expected the blocked promptAccept goroutine to be unblocked")
+	}
+}
+
 func TestShareModelJoinRequestPromptAcceptDecline(t *testing.T) {
 	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
 	m.stage = shareStageRoomActive

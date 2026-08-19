@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"adb-remote.maci.team/client/relay"
 	"adb-remote.maci.team/client/transportLayer"
 	"fmt"
 )
@@ -16,7 +17,10 @@ func Handshake(client *transportLayer.Client) (string, error) {
 	if err := client.SendConnect(); err != nil {
 		return "", err
 	}
-	container := <-client.Messages()
+	container, ok := <-client.Messages()
+	if !ok {
+		return "", relay.ErrTransportClosed
+	}
 	defer container.Dispose()
 	message, err := container.Data()
 	if err != nil {

@@ -402,3 +402,29 @@ func TestOwnerDisconnectClosesGuestConnection(t *testing.T) {
 		t.Fatalf("expected the guest connection to be closed when the room owner disconnects, got err=%v", err)
 	}
 }
+
+// TestGuestDisconnectNotifiesOwner is a regression test for the owner
+// having no other way to learn its guest is gone: unlike the owner
+// disconnecting (which the transporter tears the whole room down for), the
+// owner's own connection survives a guest disconnect, so it needs an
+// explicit CommandGuestLeft notification.
+func TestGuestDisconnectNotifiesOwner(t *testing.T) {
+	address := startTestSystem(t)
+	owner := dialTestClient(t, address)
+	guest := dialTestClient(t, address)
+
+	roomId := owner.createRoom()
+	joinRoomAndAccept(t, owner, guest, roomId)
+
+	_ = guest.conn.Close()
+
+	message := owner.readMessage()
+	if message.Command() != protocol.CommandGuestLeft {
+		t.Fatalf("expected a CommandGuestLeft notification, got %x", message.Command())
+	}
+
+	// The owner's own connection must be unaffected: a fresh guest can
+	// still join the now-empty room.
+	guest2 := dialTestClient(t, address)
+	joinRoomAndAccept(t, owner, guest2, roomId)
+}

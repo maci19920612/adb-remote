@@ -248,6 +248,21 @@ func (cc *ClientConnection) SendJoinRoomResponse(isAccepted int, ownerClientId s
 	return message.Write(cc.connection)
 }
 
+// SendGuestLeft notifies this (owner) connection that its guest disconnected
+// from the room, since the owner's own connection is otherwise unaffected
+// and has no other way to learn about it.
+func (cc *ClientConnection) SendGuestLeft() error {
+	pool := cc.owner.transporterMessagePool
+	container := pool.Obtain()
+	defer container.Dispose()
+	message, err := container.Data()
+	if err != nil {
+		return err
+	}
+	message.SetDirectCommand(protocol.CommandGuestLeft)
+	return message.Write(cc.connection)
+}
+
 func (cc *ClientConnection) SendInvalidPayloadError(command uint32) error {
 	pool := cc.owner.transporterMessagePool
 	container := pool.Obtain()

@@ -79,6 +79,13 @@ func dispatchOwnerMessage(client *transportLayer.Client, multiplexer *relay.Owne
 		// dispatch loop so an already-connected guest's ADB traffic keeps
 		// flowing while the operator decides.
 		go handleJoinRequest(client, ownerIdentity, promptAccept, onEvent, payload.ClientId, payload.PublicKey)
+	case protocol.CommandGuestLeft:
+		defer container.Dispose()
+		logger.Info("The guest left the room")
+		// Only one guest is ever active at a time, so every currently open
+		// stream necessarily belonged to it.
+		multiplexer.Close()
+		emitOwner(onEvent, OwnerEvent{Kind: OwnerGuestLeft})
 	default:
 		defer container.Dispose()
 		logger.Info(fmt.Sprintf("Ignoring unexpected message, command: %x", message.Command()))
@@ -115,7 +122,10 @@ func createRoom(client *transportLayer.Client) (string, error) {
 		return "", err
 	}
 
-	container := <-client.Messages()
+	container, ok := <-client.Messages()
+	if !ok {
+		return "", relay.ErrTransportClosed
+	}
 	defer container.Dispose()
 	message, err := container.Data()
 	if err != nil {

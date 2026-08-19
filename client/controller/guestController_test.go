@@ -3,6 +3,7 @@ package controller
 import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/identity"
+	"adb-remote.maci.team/client/relay"
 	"adb-remote.maci.team/shared/protocol"
 	"bytes"
 	"context"
@@ -334,6 +335,58 @@ func TestJoinAsGuestRelaysAdbTraffic(t *testing.T) {
 	_, disconnectCalls := smartSocket.calls()
 	if len(disconnectCalls) != 1 || disconnectCalls[0] != wantAddress {
 		t.Fatalf("expected exactly one Disconnect(%q) call after shutdown, got %v", wantAddress, disconnectCalls)
+	}
+}
+
+// TestJoinAsGuestStopsWhenTransporterDisconnectsWhileIdle is a regression
+// test for the guest having no other way to notice the room owner (or the
+// transporter itself) is gone while it isn't actively relaying: before this
+// fix, JoinAsGuest only watched ctx.Done() and proxy.Connections() while
+// idle, so it would block forever instead of returning.
+func TestJoinAsGuestStopsWhenTransporterDisconnectsWhileIdle(t *testing.T) {
+	client, server := newConnectedClient(t)
+	port := freeLocalPort(t)
+	smartSocket := &fakeGuestSmartSocket{}
+	guestIdentity := testIdentity(t)
+
+	var events []GuestEvent
+	var eventsMu sync.Mutex
+	onEvent := func(e GuestEvent) {
+		eventsMu.Lock()
+		defer eventsMu.Unlock()
+		events = append(events, e)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- JoinAsGuest(ctx, client, smartSocket, guestIdentity, "ROOM1", port, onEvent) }()
+
+	respondToJoinRoom(t, server, 1)
+
+	// Idle: no local adb server has connected yet. Disconnecting here must
+	// still be noticed.
+	_ = server.Close()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, relay.ErrTransportClosed) {
+			t.Fatalf("expected relay.ErrTransportClosed, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("JoinAsGuest did not stop after the transporter disconnected while idle")
+	}
+
+	eventsMu.Lock()
+	defer eventsMu.Unlock()
+	found := false
+	for _, e := range events {
+		if e.Kind == GuestTransportLost {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a GuestTransportLost event, got %+v", events)
 	}
 }
 

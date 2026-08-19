@@ -182,6 +182,40 @@ func TestCloseStopsReaderWithoutPanicking(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 }
 
+// TestMessagesChannelClosesOnDisconnect is a regression test: consumers of
+// Messages() (the controller and relay packages) rely on the channel
+// closing to notice the connection is gone, rather than blocking forever.
+func TestMessagesChannelClosesOnDisconnect(t *testing.T) {
+	client, server := newConnectedTestClient(t)
+	_ = server.Close()
+
+	select {
+	case _, ok := <-client.Messages():
+		if ok {
+			t.Fatalf("expected the channel to be closed, got a value instead")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for the channel to close after the server disconnected")
+	}
+}
+
+// TestMessagesChannelClosesOnClientClose covers the other trigger for the
+// same guarantee: calling Close() locally must also close the channel, not
+// just a disconnect initiated by the peer.
+func TestMessagesChannelClosesOnClientClose(t *testing.T) {
+	client, _ := newConnectedTestClient(t)
+	client.Close()
+
+	select {
+	case _, ok := <-client.Messages():
+		if ok {
+			t.Fatalf("expected the channel to be closed, got a value instead")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for the channel to close after Close()")
+	}
+}
+
 // TestConcurrentSendAdbMessageDoesNotInterleaveWrites exercises the
 // scenario the owner-side stream multiplexer relies on: many goroutines
 // (one per open ADB stream) calling SendAdbMessage concurrently must not
