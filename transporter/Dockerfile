@@ -1,7 +1,7 @@
 # Build context is the repository root (the go.work workspace root), e.g.:
 #   podman build -f transporter/Dockerfile -t adb-remote-transporter .
 
-FROM golang:1.23-alpine AS builder
+FROM golang:1.24-alpine AS builder
 WORKDIR /src
 
 COPY go.work go.work.sum ./

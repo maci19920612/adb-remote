@@ -1,0 +1,7 @@
+# Build outputs
+/client/adb-remote-client
+/client/client
+/transporter/transporter
+
+# Logs
+*.log
