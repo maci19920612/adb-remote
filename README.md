@@ -14,11 +14,14 @@ Three Go modules, tied together by the `go.work` workspace at the repo root:
   device), a second client joins it (the *guest*), and once the owner
   accepts the join request the transporter blindly forwards
   `CommandAdbTransport` messages between the two.
-- **`client`** — the CLI. It has two modes:
+- **`client`** — the CLI, with an interactive terminal UI (Bubble Tea) for
+  both modes:
   - `share`: owns a device (as seen by its local `adb devices`) and offers
-    it to a room.
+    it to a room — pick the device from a live list (with refresh), then
+    watch join requests arrive and accept/decline them.
   - `connect`: joins a room and exposes the shared device locally, so a real
-    `adb connect 127.0.0.1:<port>` on that machine can drive it.
+    `adb connect 127.0.0.1:<port>` on that machine can drive it — shows your
+    client id and the connection state as it progresses.
 
 ## Building
 
@@ -80,18 +83,42 @@ The client also reads `config.json` from its current working directory:
 Here `transporterAddress` is the address of the (remote) transporter to
 **dial**.
 
+Both commands launch an interactive terminal UI and need a real terminal
+(they exit with an error if stdout isn't a TTY — no surprise garbled output
+in a script or pipe).
+
 ### Owner: sharing a device
 
 ```sh
 cd client
 cp config.example.json config.json   # point at your transporter
-go run . share --targetDevice emulator-5554
+go run . share
 ```
 
-This prints a room id. Share that (out of band — e.g. chat) with whoever
-you want to give access to. For every join request it prompts on the TTY
-(`y`/`n`); pass `--yes` to auto-accept every request instead (useful for
-scripting/demos, not recommended for anything you didn't set up yourself).
+You'll see a live device list (from your local `adb devices`); press `r` to
+refresh it, arrow keys to move, `enter` to pick one. Pass `--targetDevice
+emulator-5554` to skip the picker and go straight to creating a room. Once
+the room exists you'll see:
+
+```
+Your client id: MVJK1457
+Room id:        QNZQ5630
+
+Waiting for guests to join...
+```
+
+Share the room id out of band (chat, etc.) with whoever you want to give
+access to. Every join request shows the guest's client id and prompts
+`[y/n]`:
+
+```
+Join request from clientId: QLHW5807 — accept? [y/n]
+```
+
+Accepted/declined requests are logged with the client id in the activity
+feed below. Pass `--yes` to auto-accept every request instead of prompting
+(useful for scripting/demos, not recommended for anything you didn't set up
+yourself) — accept/decline still gets logged with the client id either way.
 
 ### Guest: connecting to a shared device
 
@@ -100,7 +127,20 @@ cd client
 go run . connect --targetRoomId <ROOM_ID> --port 5038
 ```
 
-Once it prints "Connected...", point your local `adb` at it:
+This shows your client id and the connection state as it progresses
+(`connecting to the transporter...` → `joining room...` →
+`ready — waiting for a local adb connection` → `relaying ADB traffic`, or
+an error/declined state), plus the command to run once it's ready:
+
+```
+Your client id: QLHW5807
+Room id:        QNZQ5630
+
+Connection state: ready — waiting for a local adb connection
+
+Point your local adb at it with:
+  adb connect 127.0.0.1:5038
+```
 
 ```sh
 adb connect 127.0.0.1:5038
@@ -110,11 +150,16 @@ adb -s 127.0.0.1:5038 shell
 `--port` defaults to `5038` (`adb.DefaultProxyPort`) and just needs to be a
 free local port.
 
+Client logs (from the underlying transport/relay layers) don't go to
+stdout — that's reserved for the TUI — they're written to
+`$TMPDIR/adb-remote-client.log` instead.
+
 ## Testing
 
 Every package has unit and/or integration tests; the protocol, pool, relay
 and room-lifecycle tests spin up real listeners/pipes rather than mocking
-the network:
+the network. The TUI models (`client/tui`) are tested by calling `Update`
+directly with synthetic messages — no real terminal needed:
 
 ```sh
 cd shared      && go test ./... -race
@@ -153,9 +198,15 @@ the `sync:` protocol and multi-chunk flow control), and several concurrent
   fresh `host:transport:<serial>` + service-string connection to the local
   adb-server and relays just that one stream as `WRTE`/`OKAY`/`CLSE`,
   honoring basic ADB flow control (wait for an `OKAY` after each `WRTE`
-  before sending the next one for that stream). A join request's TTY prompt
-  runs off the main dispatch loop so it can't stall an already-connected
-  guest's traffic.
+  before sending the next one for that stream). Deciding whether to accept
+  a join request (the TUI's y/n prompt, or `--yes`) runs off the main
+  dispatch loop so it can't stall an already-connected guest's traffic —
+  see `TestJoinRequestDoesNotBlockActiveStreamTraffic`.
+- **The TUI itself**: verified with a real two-process, real-terminal (PTY)
+  run — device list → refresh → select → room id, a real guest joining
+  with its client id shown and accepted, and the guest side showing its
+  client id and connection state through to "ready". Model state
+  transitions are additionally unit-tested directly (`client/tui`).
 
 ### Two ADB wire-format quirks that will break this against real `adb` if regressed
 
