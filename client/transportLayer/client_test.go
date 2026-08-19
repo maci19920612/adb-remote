@@ -4,9 +4,11 @@ import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/config"
 	"adb-remote.maci.team/shared/protocol"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -176,4 +178,64 @@ func TestCloseStopsReaderWithoutPanicking(t *testing.T) {
 	// Give the reader goroutine a chance to observe the cancellation; the
 	// real assertion is that this does not panic or deadlock.
 	time.Sleep(50 * time.Millisecond)
+}
+
+// TestConcurrentSendAdbMessageDoesNotInterleaveWrites exercises the
+// scenario the owner-side stream multiplexer relies on: many goroutines
+// (one per open ADB stream) calling SendAdbMessage concurrently must not
+// interleave their bytes on the wire, or the transporter would see
+// corrupted framing.
+func TestConcurrentSendAdbMessageDoesNotInterleaveWrites(t *testing.T) {
+	client, server := newConnectedTestClient(t)
+
+	const senders = 20
+	var wg sync.WaitGroup
+	for i := 0; i < senders; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			adbMessage := adb.CreateMessage()
+			if err := adbMessage.Set(adb.CommandOpen, uint32(i+1), 0, []byte(fmt.Sprintf("stream-%02d", i))); err != nil {
+				t.Errorf("Set failed: %s", err)
+				return
+			}
+			if err := client.SendAdbMessage(adbMessage); err != nil {
+				t.Errorf("SendAdbMessage failed: %s", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	seen := make(map[uint32]bool)
+	for i := 0; i < senders; i++ {
+		received := readMessage(t, server)
+		if received.Command() != protocol.CommandAdbTransport {
+			t.Fatalf("expected command %x, got %x", protocol.CommandAdbTransport, received.Command())
+		}
+		decoded, err := adb.DecodeMessage(received.Payload())
+		if err != nil {
+			t.Fatalf("message #%d: DecodeMessage failed (interleaved/corrupted write?): %s", i, err)
+		}
+		expected := fmt.Sprintf("stream-%02d", decoded.Arg1()-1)
+		if decoded.DataString() != expected {
+			t.Fatalf("message #%d: expected data %q for arg1 %d, got %q", i, expected, decoded.Arg1(), decoded.DataString())
+		}
+		if seen[decoded.Arg1()] {
+			t.Fatalf("message #%d: arg1 %d delivered more than once", i, decoded.Arg1())
+		}
+		seen[decoded.Arg1()] = true
+	}
+	if len(seen) != senders {
+		t.Fatalf("expected %d distinct messages, got %d", senders, len(seen))
+	}
+}
+
+func readMessage(t *testing.T, conn net.Conn) *protocol.TransporterMessage {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	message := protocol.CreateTransporterMessage()
+	if err := message.Read(conn); err != nil {
+		t.Fatalf("failed to read a message: %s", err)
+	}
+	return message
 }

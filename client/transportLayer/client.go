@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
 )
 
 const messageChannelBufferSize = 0
@@ -21,6 +22,13 @@ type MessageContainer = utils.DisposableObjectContainer[protocol.TransporterMess
 type Client struct {
 	connection net.Conn
 	cancelFunc context.CancelFunc
+
+	// writeMutex serializes writes to connection. Owner-side stream
+	// multiplexing calls SendAdbMessage concurrently from one goroutine
+	// per open ADB stream; without this, two concurrent Write calls on the
+	// same net.Conn could interleave their bytes on the wire and corrupt
+	// the transporter protocol framing.
+	writeMutex sync.Mutex
 
 	messageChannel chan *MessageContainer
 
@@ -106,6 +114,14 @@ func (c *Client) Close() {
 	}
 }
 
+// writeMessage serializes m onto the wire; see the writeMutex field comment
+// for why concurrent callers need this.
+func (c *Client) writeMessage(m *protocol.TransporterMessage) error {
+	c.writeMutex.Lock()
+	defer c.writeMutex.Unlock()
+	return m.Write(c.connection)
+}
+
 // withMessage obtains a pooled message, hands it to fn, and disposes of it
 // once fn returns.
 func (c *Client) withMessage(fn func(*protocol.TransporterMessage) error) error {
@@ -128,7 +144,7 @@ func (c *Client) SendError(command uint32, errorCode int, errorMessage string) e
 		}); err != nil {
 			return err
 		}
-		return m.Write(c.connection)
+		return c.writeMessage(m)
 	})
 }
 
@@ -141,7 +157,7 @@ func (c *Client) SendConnect() error {
 		}); err != nil {
 			return err
 		}
-		return m.Write(c.connection)
+		return c.writeMessage(m)
 	})
 }
 
@@ -149,7 +165,7 @@ func (c *Client) SendCreateRoom() error {
 	c.Logger.Info("SendCreateRoom called")
 	return c.withMessage(func(m *protocol.TransporterMessage) error {
 		m.SetDirectCommand(protocol.CommandCreateRoom)
-		return m.Write(c.connection)
+		return c.writeMessage(m)
 	})
 }
 
@@ -162,7 +178,7 @@ func (c *Client) SendJoinRoom(roomId string) error {
 		}); err != nil {
 			return err
 		}
-		return m.Write(c.connection)
+		return c.writeMessage(m)
 	})
 }
 
@@ -175,7 +191,7 @@ func (c *Client) SendJoinRoomResponse(isAccepted int) error {
 		}); err != nil {
 			return err
 		}
-		return m.Write(c.connection)
+		return c.writeMessage(m)
 	})
 }
 
@@ -188,6 +204,6 @@ func (c *Client) SendAdbMessage(message *adb.AdbMessage) error {
 		if err := m.SetRawPayload(message.Bytes()); err != nil {
 			return err
 		}
-		return m.Write(c.connection)
+		return c.writeMessage(m)
 	})
 }
