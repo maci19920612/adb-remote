@@ -42,7 +42,10 @@ func registerConfiguration(container *container.Container) {
 		panic(err)
 	}
 
-	configInstance := config.CreateConfig(path.Join(workingDirectory, ConfigFileName))
+	configInstance, err := config.CreateConfig(path.Join(workingDirectory, ConfigFileName))
+	if err != nil {
+		panic(err)
+	}
 	err = container.Singleton(func() *config.TransporterConfiguration {
 		return configInstance
 	})
