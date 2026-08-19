@@ -120,9 +120,17 @@ func (m *TransporterMessage) SetPayloadCreateRoomResponse(data *TransporterMessa
 //endregion
 
 // region Connect to room payload
+
+// TransporterMessagePayloadConnectRoom carries a join request in both
+// directions: the guest sends {RoomId, PublicKey} to the transporter, which
+// forwards {RoomId, ClientId, PublicKey} to the room owner once it knows
+// which guest sent it. PublicKey is the guest's identity public key (see
+// client/identity); the owner displays its fingerprint so the operator can
+// verify the guest's identity out of band before accepting.
 type TransporterMessagePayloadConnectRoom struct {
-	RoomId   string
-	ClientId string
+	RoomId    string
+	ClientId  string
+	PublicKey []byte
 }
 
 func (m *TransporterMessage) GetPayloadConnectRoom() (*TransporterMessagePayloadConnectRoom, error) {
@@ -130,13 +138,18 @@ func (m *TransporterMessage) GetPayloadConnectRoom() (*TransporterMessagePayload
 	if err != nil {
 		return nil, err
 	}
-	_, clientId, err := m.readString(offset)
+	offset, clientId, err := m.readString(offset)
+	if err != nil {
+		return nil, err
+	}
+	_, publicKey, err := m.readString(offset)
 	if err != nil {
 		return nil, err
 	}
 	return &TransporterMessagePayloadConnectRoom{
-		RoomId:   roomId,
-		ClientId: clientId,
+		RoomId:    roomId,
+		ClientId:  clientId,
+		PublicKey: []byte(publicKey),
 	}, nil
 }
 
@@ -145,7 +158,11 @@ func (m *TransporterMessage) SetPayloadConnectRoom(data *TransporterMessagePaylo
 	if err != nil {
 		return err
 	}
-	payloadLength, err := m.writeString(offset, data.ClientId)
+	offset, err = m.writeString(offset, data.ClientId)
+	if err != nil {
+		return err
+	}
+	payloadLength, err := m.writeString(offset, string(data.PublicKey))
 	if err != nil {
 		return err
 	}

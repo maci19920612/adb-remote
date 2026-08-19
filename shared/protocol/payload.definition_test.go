@@ -1,6 +1,9 @@
 package protocol
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
 func TestErrorPayloadRoundTrip(t *testing.T) {
 	m := CreateTransporterMessage()
@@ -70,9 +73,11 @@ func TestCreateRoomResponsePayloadRoundTrip(t *testing.T) {
 // out-of-range slices).
 func TestConnectRoomPayloadRoundTrip(t *testing.T) {
 	m := CreateTransporterMessage()
+	publicKey := []byte{0x00, 0x01, 0xff, 0xfe, 0x7f} // arbitrary bytes, including non-UTF8, like a real ed25519 key
 	if err := m.SetPayloadConnectRoom(&TransporterMessagePayloadConnectRoom{
-		RoomId:   "ROOM-A-LONGER-ID",
-		ClientId: "CLIENT-B",
+		RoomId:    "ROOM-A-LONGER-ID",
+		ClientId:  "CLIENT-B",
+		PublicKey: publicKey,
 	}); err != nil {
 		t.Fatalf("SetPayloadConnectRoom failed: %s", err)
 	}
@@ -85,6 +90,23 @@ func TestConnectRoomPayloadRoundTrip(t *testing.T) {
 	}
 	if payload.ClientId != "CLIENT-B" {
 		t.Fatalf("expected client id %q, got %q", "CLIENT-B", payload.ClientId)
+	}
+	if !bytes.Equal(payload.PublicKey, publicKey) {
+		t.Fatalf("expected public key %x, got %x", publicKey, payload.PublicKey)
+	}
+}
+
+func TestConnectRoomPayloadWithoutPublicKey(t *testing.T) {
+	m := CreateTransporterMessage()
+	if err := m.SetPayloadConnectRoom(&TransporterMessagePayloadConnectRoom{RoomId: "ROOM1"}); err != nil {
+		t.Fatalf("SetPayloadConnectRoom failed: %s", err)
+	}
+	payload, err := m.GetPayloadConnectRoom()
+	if err != nil {
+		t.Fatalf("GetPayloadConnectRoom failed: %s", err)
+	}
+	if len(payload.PublicKey) != 0 {
+		t.Fatalf("expected an empty public key, got %x", payload.PublicKey)
 	}
 }
 
