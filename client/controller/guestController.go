@@ -1,8 +1,11 @@
 package controller
 
 import (
+	"adb-remote.maci.team/client/adb"
+	"adb-remote.maci.team/client/relay"
 	"adb-remote.maci.team/client/transportLayer"
 	"adb-remote.maci.team/shared/protocol"
+	"context"
 	"fmt"
 )
 
@@ -11,35 +14,51 @@ type ErrJoinRoomDenied struct {
 }
 
 func (e *ErrJoinRoomDenied) Error() string {
-	return fmt.Sprintf("Join room request denied: %s", e.RoomId)
+	return fmt.Sprintf("join room request denied: %s", e.RoomId)
 }
 
-func JoinAsGuest(client *transportLayer.Client, roomId string) error {
-	/**
-	Steps:
-	- Connect to the remote room
-	- Start the smart socket server
-	- Connect the local ADB instance to that server
-	*/
-	var err error
-	err = roomJoinStep(client, roomId)
-	if err != nil {
+// JoinAsGuest joins roomId as a guest, then starts a local AdbProxy on
+// localPort and relays ADB protocol traffic between it and the room owner
+// until ctx is cancelled or the proxy fails to start.
+func JoinAsGuest(ctx context.Context, client *transportLayer.Client, roomId string, localPort string) error {
+	if err := roomJoinStep(client, roomId); err != nil {
 		return err
+	}
+
+	logger := client.Logger
+	proxy := adb.NewAdbProxy(localPort, logger)
+	if err := proxy.Start(roomId); err != nil {
+		return err
+	}
+	defer proxy.Stop()
+
+	fmt.Printf("Connected. Point your local ADB at this device with: adb connect 127.0.0.1:%s\n", localPort)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case conn := <-proxy.Connections():
+			logger.Info("Local ADB server connected, starting the relay")
+			err := relay.Run(ctx, conn, client, logger)
+			logger.Info(fmt.Sprintf("Relay stopped: %s", err))
+		}
 	}
 }
 
 func roomJoinStep(client *transportLayer.Client, roomId string) error {
-	var err error
 	logger := client.Logger
-	mPool := client.TransporterMessagePool
 	logger.Info(fmt.Sprintf("Joining room %s", roomId))
-	err = client.SendJoinRoom(roomId)
-	if err != nil {
+	if err := client.SendJoinRoom(roomId); err != nil {
 		logger.Error(fmt.Sprintf("Failed to join room: %s, error: %s", roomId, err))
 		return err
 	}
-	message := <-client.MessageChannel
-	defer mPool.Release(message)
+	container := <-client.Messages()
+	defer container.Dispose()
+	message, err := container.Data()
+	if err != nil {
+		return err
+	}
 	if err := protocol.ExpectCommand(message, protocol.CommandJoinRoom|protocol.CommandResponseMask); err != nil {
 		logger.Error(fmt.Sprintf("Unexpected message (expected: JoinRoomResponse): %x", message.Command()))
 		return err
@@ -51,12 +70,8 @@ func roomJoinStep(client *transportLayer.Client, roomId string) error {
 	}
 	if payload.Accepted == 0 {
 		logger.Error(fmt.Sprintf("Join room declined, roomId: %s", roomId))
-		return &ErrJoinRoomDenied{roomId}
+		return &ErrJoinRoomDenied{RoomId: roomId}
 	}
-	logger.Info(fmt.Sprintf("Joined to room: %s", roomId))
+	logger.Info(fmt.Sprintf("Joined room: %s", roomId))
 	return nil
-}
-
-func startSmartAdbSocket() {
-	
 }
