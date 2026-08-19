@@ -5,7 +5,9 @@ import (
 	"adb-remote.maci.team/shared/protocol"
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -38,6 +40,47 @@ func sendJoinRoomRequest(t *testing.T, server net.Conn, roomId string, guestClie
 	}
 }
 
+func expectJoinResponse(t *testing.T, server net.Conn) int {
+	t.Helper()
+	response := readMessage(t, server)
+	if response.Command() != protocol.CommandJoinRoom|protocol.CommandResponseMask {
+		t.Fatalf("expected a join room response, got %x", response.Command())
+	}
+	payload, err := response.GetPayloadConnectRoomResponse()
+	if err != nil {
+		t.Fatalf("GetPayloadConnectRoomResponse failed: %s", err)
+	}
+	return payload.Accepted
+}
+
+func sendAdbTransport(t *testing.T, server net.Conn, adbMessage *adb.AdbMessage) {
+	t.Helper()
+	wrapper := protocol.CreateTransporterMessage()
+	wrapper.SetDirectCommand(protocol.CommandAdbTransport)
+	if err := wrapper.SetRawPayload(adbMessage.Bytes()); err != nil {
+		t.Fatalf("SetRawPayload failed: %s", err)
+	}
+	if err := wrapper.Write(server); err != nil {
+		t.Fatalf("failed to write the wrapped ADB message: %s", err)
+	}
+}
+
+// expectAdbTransport reads the next message from server and returns it
+// decoded as an ADB message; it fails the test if it isn't a
+// CommandAdbTransport wrapper.
+func expectAdbTransport(t *testing.T, server net.Conn) *adb.AdbMessage {
+	t.Helper()
+	forwarded := readMessage(t, server)
+	if forwarded.Command() != protocol.CommandAdbTransport {
+		t.Fatalf("expected command %x, got %x", protocol.CommandAdbTransport, forwarded.Command())
+	}
+	decoded, err := adb.DecodeMessage(forwarded.Payload())
+	if err != nil {
+		t.Fatalf("DecodeMessage failed: %s", err)
+	}
+	return decoded
+}
+
 func TestCreateRoomSuccess(t *testing.T) {
 	client, server := newConnectedClient(t)
 
@@ -64,90 +107,80 @@ func TestCreateRoomSuccess(t *testing.T) {
 	}
 }
 
-func TestWaitForRoomJoinRequestAccepted(t *testing.T) {
+func TestHandleJoinRequestAccepted(t *testing.T) {
 	client, server := newConnectedClient(t)
 
-	done := make(chan error, 1)
+	done := make(chan struct{})
 	go func() {
-		accepted, err := waitForRoomJoinRequest(client, func(clientId string) (bool, error) {
+		defer close(done)
+		handleJoinRequest(client, func(clientId string) (bool, error) {
 			if clientId != "GUEST1" {
 				t.Errorf("expected guest client id %q, got %q", "GUEST1", clientId)
 			}
 			return true, nil
-		})
-		if err == nil && !accepted {
-			err = errors.New("expected the request to be accepted")
-		}
-		done <- err
+		}, "GUEST1")
 	}()
 
-	sendJoinRoomRequest(t, server, "ROOM1", "GUEST1")
-
-	response := readMessage(t, server)
-	if response.Command() != protocol.CommandJoinRoom|protocol.CommandResponseMask {
-		t.Fatalf("expected a join room response, got %x", response.Command())
+	if accepted := expectJoinResponse(t, server); accepted != 1 {
+		t.Fatalf("expected Accepted=1, got %d", accepted)
 	}
-	payload, err := response.GetPayloadConnectRoomResponse()
-	if err != nil {
-		t.Fatalf("GetPayloadConnectRoomResponse failed: %s", err)
-	}
-	if payload.Accepted != 1 {
-		t.Fatalf("expected Accepted=1, got %d", payload.Accepted)
-	}
-
-	if err := <-done; err != nil {
-		t.Fatalf("waitForRoomJoinRequest failed: %s", err)
-	}
+	<-done
 }
 
-func TestWaitForRoomJoinRequestDeclined(t *testing.T) {
+func TestHandleJoinRequestDeclined(t *testing.T) {
 	client, server := newConnectedClient(t)
 
-	done := make(chan bool, 1)
+	done := make(chan struct{})
 	go func() {
-		accepted, err := waitForRoomJoinRequest(client, func(clientId string) (bool, error) {
-			return false, nil
-		})
-		if err != nil {
-			t.Errorf("waitForRoomJoinRequest failed: %s", err)
-		}
-		done <- accepted
+		defer close(done)
+		handleJoinRequest(client, func(clientId string) (bool, error) { return false, nil }, "GUEST1")
 	}()
 
-	sendJoinRoomRequest(t, server, "ROOM1", "GUEST1")
-	response := readMessage(t, server)
-	payload, err := response.GetPayloadConnectRoomResponse()
-	if err != nil {
-		t.Fatalf("GetPayloadConnectRoomResponse failed: %s", err)
+	if accepted := expectJoinResponse(t, server); accepted != 0 {
+		t.Fatalf("expected Accepted=0, got %d", accepted)
 	}
-	if payload.Accepted != 0 {
-		t.Fatalf("expected Accepted=0, got %d", payload.Accepted)
-	}
-	if accepted := <-done; accepted {
-		t.Fatalf("expected the request to be reported as declined")
-	}
+	<-done
 }
 
-// fakeSmartSocket hands out a fixed net.Conn from Transport, standing in
-// for a real local device connection.
+// fakeSmartSocket hands out a preconfigured net.Conn per requested service,
+// standing in for connections to the local device.
 type fakeSmartSocket struct {
 	adb.IAdbSmartSocket
-	conn net.Conn
-	err  error
+
+	mu        sync.Mutex
+	byService map[string]net.Conn
 }
 
-func (f *fakeSmartSocket) Transport(targetSerial string) (net.Conn, error) {
-	return f.conn, f.err
+func newFakeSmartSocket() *fakeSmartSocket {
+	return &fakeSmartSocket{byService: make(map[string]net.Conn)}
+}
+
+func (f *fakeSmartSocket) withStream(service string, conn net.Conn) *fakeSmartSocket {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.byService[service] = conn
+	return f
+}
+
+func (f *fakeSmartSocket) OpenStream(targetSerial string, service string) (net.Conn, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	conn, ok := f.byService[service]
+	if !ok {
+		return nil, fmt.Errorf("no fake stream configured for service %q", service)
+	}
+	return conn, nil
 }
 
 // TestJoinAsRoomOwnerRelaysAdbTraffic exercises the full owner-side path:
-// create a room, accept a join request, and confirm ADB traffic is relayed
-// in both directions between the local "device" and the transporter.
+// create a room, accept a join request, open a stream for a service, and
+// confirm ADB traffic is relayed correctly in both directions, including
+// flow control (WRTE must wait for OKAY) and a clean stream close.
 func TestJoinAsRoomOwnerRelaysAdbTraffic(t *testing.T) {
 	client, server := newConnectedClient(t)
 	deviceConn, ownerSideConn := net.Pipe()
 	defer deviceConn.Close()
-	smartSocket := &fakeSmartSocket{conn: ownerSideConn}
+	smartSocket := newFakeSmartSocket().withStream("shell,v2,raw:echo hi", ownerSideConn)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -159,52 +192,175 @@ func TestJoinAsRoomOwnerRelaysAdbTraffic(t *testing.T) {
 
 	respondToCreateRoom(t, server, "ROOM7")
 	sendJoinRoomRequest(t, server, "ROOM7", "GUEST1")
-	readMessage(t, server) // the join room accept response
+	if accepted := expectJoinResponse(t, server); accepted != 1 {
+		t.Fatalf("expected the join request to be accepted, got Accepted=%d", accepted)
+	}
 
-	// Remote -> local: the transporter sends an OPEN, the local device must
-	// receive it verbatim.
+	// Guest opens a stream.
 	openMessage := adb.CreateMessage()
-	if err := openMessage.Set(adb.CommandOpen, 3, 0, []byte("shell:")); err != nil {
+	if err := openMessage.Set(adb.CommandOpen, 5, 0, []byte("shell,v2,raw:echo hi\x00")); err != nil {
 		t.Fatalf("Set failed: %s", err)
 	}
-	wrapper := protocol.CreateTransporterMessage()
-	wrapper.SetDirectCommand(protocol.CommandAdbTransport)
-	if err := wrapper.SetRawPayload(openMessage.Bytes()); err != nil {
-		t.Fatalf("SetRawPayload failed: %s", err)
+	sendAdbTransport(t, server, openMessage)
+
+	// Owner must acknowledge with OKAY(ownId, guestId=5).
+	okay := expectAdbTransport(t, server)
+	if okay.Command() != adb.CommandOkay {
+		t.Fatalf("expected OKAY, got %x", okay.Command())
 	}
-	if err := wrapper.Write(server); err != nil {
-		t.Fatalf("failed to write the wrapped OPEN: %s", err)
+	if okay.Arg2() != 5 {
+		t.Fatalf("expected the OKAY to ack guest id 5, got %d", okay.Arg2())
+	}
+	ownId := okay.Arg1()
+
+	// Device -> guest: bytes written on the device connection must arrive
+	// as a WRTE to the guest.
+	if _, err := deviceConn.Write([]byte("hi\n")); err != nil {
+		t.Fatalf("failed to write from the device: %s", err)
+	}
+	wrte := expectAdbTransport(t, server)
+	if wrte.Command() != adb.CommandWrite || wrte.DataString() != "hi\n" {
+		t.Fatalf("expected WRTE %q, got command=%x data=%q", "hi\n", wrte.Command(), wrte.DataString())
+	}
+	if wrte.Arg1() != ownId || wrte.Arg2() != 5 {
+		t.Fatalf("expected WRTE(arg1=%d, arg2=5), got arg1=%d arg2=%d", ownId, wrte.Arg1(), wrte.Arg2())
 	}
 
-	received := adb.CreateMessage()
+	// The owner must not send a second WRTE before the guest OKAYs the
+	// first one (flow control). Write more data locally, then only after
+	// confirming nothing arrives do we send the OKAY.
+	if _, err := deviceConn.Write([]byte("more\n")); err != nil {
+		t.Fatalf("failed to write from the device: %s", err)
+	}
+	_ = server.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	stalled := protocol.CreateTransporterMessage()
+	if err := stalled.Read(server); err == nil {
+		t.Fatalf("expected no WRTE before the guest OKAYs the previous one, got command %x", stalled.Command())
+	}
+	_ = server.SetReadDeadline(time.Time{})
+
+	guestOkay := adb.CreateMessage()
+	if err := guestOkay.Set(adb.CommandOkay, 5, ownId, nil); err != nil {
+		t.Fatalf("Set failed: %s", err)
+	}
+	sendAdbTransport(t, server, guestOkay)
+
+	wrte2 := expectAdbTransport(t, server)
+	if wrte2.Command() != adb.CommandWrite || wrte2.DataString() != "more\n" {
+		t.Fatalf("expected the queued WRTE %q after the OKAY, got command=%x data=%q", "more\n", wrte2.Command(), wrte2.DataString())
+	}
+
+	// Guest -> device: a WRTE from the guest must be written to the device
+	// connection, and acknowledged with an OKAY.
+	guestWrite := adb.CreateMessage()
+	if err := guestWrite.Set(adb.CommandWrite, 5, ownId, []byte("input")); err != nil {
+		t.Fatalf("Set failed: %s", err)
+	}
+	sendAdbTransport(t, server, guestWrite)
+
+	deviceBuffer := make([]byte, len("input"))
 	_ = deviceConn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	if err := received.Read(deviceConn); err != nil {
-		t.Fatalf("failed to read the relayed OPEN: %s", err)
+	if _, err := deviceConn.Read(deviceBuffer); err != nil {
+		t.Fatalf("failed to read what the owner wrote to the device: %s", err)
 	}
-	if received.Command() != adb.CommandOpen {
-		t.Fatalf("expected command %x, got %x", adb.CommandOpen, received.Command())
+	if string(deviceBuffer) != "input" {
+		t.Fatalf("expected the device to receive %q, got %q", "input", deviceBuffer)
+	}
+	ackForWrite := expectAdbTransport(t, server)
+	if ackForWrite.Command() != adb.CommandOkay || ackForWrite.Arg1() != ownId || ackForWrite.Arg2() != 5 {
+		t.Fatalf("expected OKAY(%d, 5) acking the guest's WRTE, got command=%x arg1=%d arg2=%d", ownId, ackForWrite.Command(), ackForWrite.Arg1(), ackForWrite.Arg2())
 	}
 
-	// Local -> remote: the local device replies with OKAY, the transporter
-	// must see it wrapped in a CommandAdbTransport message.
-	okayMessage := adb.CreateMessage()
-	if err := okayMessage.Set(adb.CommandOkay, 3, 0, nil); err != nil {
+	// The device closing its end must be relayed as a CLSE to the guest.
+	_ = deviceConn.Close()
+	clse := expectAdbTransport(t, server)
+	if clse.Command() != adb.CommandClose {
+		t.Fatalf("expected CLSE after the device closed, got %x", clse.Command())
+	}
+	if clse.Arg1() != ownId || clse.Arg2() != 5 {
+		t.Fatalf("expected CLSE(%d, 5), got arg1=%d arg2=%d", ownId, clse.Arg1(), clse.Arg2())
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected context.Canceled, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("JoinAsRoomOwner did not stop after context cancellation")
+	}
+}
+
+// TestJoinRequestDoesNotBlockActiveStreamTraffic is a regression test for
+// the bug this multiplexer fixes: prompting for a second guest's join
+// request (which can block indefinitely on TTY input) must not stall ADB
+// traffic relay for a stream that is already open.
+func TestJoinRequestDoesNotBlockActiveStreamTraffic(t *testing.T) {
+	client, server := newConnectedClient(t)
+	deviceConn, ownerSideConn := net.Pipe()
+	defer deviceConn.Close()
+	smartSocket := newFakeSmartSocket().withStream("shell,v2,raw:echo hi", ownerSideConn)
+
+	guest2Prompted := make(chan struct{})
+	unblockGuest2 := make(chan struct{})
+	promptAccept := func(clientId string) (bool, error) {
+		if clientId == "GUEST2" {
+			close(guest2Prompted)
+			<-unblockGuest2
+		}
+		return true, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- JoinAsRoomOwner(ctx, client, smartSocket, "emulator-5554", promptAccept)
+	}()
+
+	respondToCreateRoom(t, server, "ROOM7")
+
+	// GUEST1 joins and is accepted immediately (its prompt does not block).
+	sendJoinRoomRequest(t, server, "ROOM7", "GUEST1")
+	if accepted := expectJoinResponse(t, server); accepted != 1 {
+		t.Fatalf("expected GUEST1 to be accepted, got Accepted=%d", accepted)
+	}
+
+	// GUEST1 opens a stream.
+	openMessage := adb.CreateMessage()
+	if err := openMessage.Set(adb.CommandOpen, 5, 0, []byte("shell,v2,raw:echo hi\x00")); err != nil {
 		t.Fatalf("Set failed: %s", err)
 	}
-	if err := okayMessage.Write(deviceConn); err != nil {
-		t.Fatalf("failed to write the OKAY message: %s", err)
+	sendAdbTransport(t, server, openMessage)
+	okay := expectAdbTransport(t, server)
+	ownId := okay.Arg1()
+
+	// GUEST2 tries to join; its prompt blocks indefinitely until released.
+	sendJoinRoomRequest(t, server, "ROOM7", "GUEST2")
+	select {
+	case <-guest2Prompted:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("GUEST2's join request was never prompted")
 	}
 
-	forwarded := readMessage(t, server)
-	if forwarded.Command() != protocol.CommandAdbTransport {
-		t.Fatalf("expected command %x, got %x", protocol.CommandAdbTransport, forwarded.Command())
+	// While GUEST2's prompt is still blocked, GUEST1's already-open stream
+	// must keep relaying traffic.
+	if _, err := deviceConn.Write([]byte("still-flowing\n")); err != nil {
+		t.Fatalf("failed to write from the device: %s", err)
 	}
-	decoded, err := adb.DecodeMessage(forwarded.Payload())
-	if err != nil {
-		t.Fatalf("DecodeMessage failed: %s", err)
+	wrte := expectAdbTransport(t, server)
+	if wrte.Command() != adb.CommandWrite || wrte.DataString() != "still-flowing\n" {
+		t.Fatalf("expected traffic to keep flowing while GUEST2's prompt is blocked, got command=%x data=%q", wrte.Command(), wrte.DataString())
 	}
-	if decoded.Command() != adb.CommandOkay {
-		t.Fatalf("expected command %x, got %x", adb.CommandOkay, decoded.Command())
+	if wrte.Arg1() != ownId {
+		t.Fatalf("expected the WRTE for GUEST1's existing stream, got arg1=%d", wrte.Arg1())
+	}
+
+	// Releasing GUEST2's prompt must let its join complete.
+	close(unblockGuest2)
+	if accepted := expectJoinResponse(t, server); accepted != 1 {
+		t.Fatalf("expected GUEST2 to eventually be accepted, got Accepted=%d", accepted)
 	}
 
 	cancel()
