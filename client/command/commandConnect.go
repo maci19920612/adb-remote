@@ -3,11 +3,10 @@ package command
 import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/config"
-	"adb-remote.maci.team/client/controller"
 	"adb-remote.maci.team/client/transportLayer"
+	"adb-remote.maci.team/client/tui"
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
 )
 
@@ -23,11 +22,7 @@ func CreateConnectCommand(
 			if !ok {
 				return InvalidCommandArgumentType
 			}
-			fmt.Printf("Target room: %s\n", *typedArgs.TargetRoomId)
-			if err := controller.Handshake(client); err != nil {
-				return err
-			}
-			return controller.JoinAsGuest(context.Background(), client, *typedArgs.TargetRoomId, *typedArgs.LocalPort)
+			return tui.RunConnect(context.Background(), client, *typedArgs.TargetRoomId, *typedArgs.LocalPort)
 		},
 		ParameterFactory: func() (BaseCommand, error) {
 			flagSet := flag.NewFlagSet("connect", flag.ExitOnError)

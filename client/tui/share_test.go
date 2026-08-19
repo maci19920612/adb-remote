@@ -1,0 +1,232 @@
+package tui
+
+import (
+	"adb-remote.maci.team/client/adb"
+	"adb-remote.maci.team/client/controller"
+	"context"
+	"errors"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+)
+
+func TestShareModelInitFetchesDevicesWhenNoPreset(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false)
+	if m.stage != shareStageLoadingDevices {
+		t.Fatalf("expected stage %v, got %v", shareStageLoadingDevices, m.stage)
+	}
+	if m.Init() == nil {
+		t.Fatalf("expected Init to return a fetch command")
+	}
+}
+
+func TestShareModelInitSkipsPickerWithPresetDevice(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "emulator-5554", false)
+	if m.stage != shareStageConnecting {
+		t.Fatalf("expected stage %v, got %v", shareStageConnecting, m.stage)
+	}
+	if cmd := m.Init(); cmd != nil {
+		t.Fatalf("expected no Init command when a device is preset")
+	}
+	select {
+	case device := <-m.selectedDevice:
+		if device != "emulator-5554" {
+			t.Fatalf("expected the preset device id, got %q", device)
+		}
+	default:
+		t.Fatalf("expected the preset device id to already be queued")
+	}
+}
+
+func TestShareModelDevicesLoadedPopulatesList(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false)
+	devices := []adb.Device{{Id: "emulator-5554", Type: adb.TypeDevice}, {Id: "R58M", Type: adb.TypeDevice}}
+	updated, _ := m.Update(devicesLoadedMsg{devices: devices})
+	sm := updated.(*shareModel)
+	if sm.stage != shareStageSelectDevice {
+		t.Fatalf("expected stage %v, got %v", shareStageSelectDevice, sm.stage)
+	}
+	if len(sm.devices) != 2 {
+		t.Fatalf("expected 2 devices, got %d", len(sm.devices))
+	}
+}
+
+func TestShareModelDevicesLoadedError(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false)
+	wantErr := errors.New("adb not running")
+	updated, _ := m.Update(devicesLoadedMsg{err: wantErr})
+	sm := updated.(*shareModel)
+	if sm.err != wantErr {
+		t.Fatalf("expected the load error to be recorded, got %v", sm.err)
+	}
+}
+
+func TestShareModelCursorNavigation(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false)
+	m.stage = shareStageSelectDevice
+	m.devices = []adb.Device{{Id: "a"}, {Id: "b"}, {Id: "c"}}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(*shareModel)
+	if m.cursor != 1 {
+		t.Fatalf("expected cursor 1, got %d", m.cursor)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(*shareModel)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown}) // should clamp at the end
+	m = updated.(*shareModel)
+	if m.cursor != 2 {
+		t.Fatalf("expected cursor to clamp at 2, got %d", m.cursor)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(*shareModel)
+	if m.cursor != 1 {
+		t.Fatalf("expected cursor 1 after up, got %d", m.cursor)
+	}
+}
+
+func TestShareModelEnterSelectsDevice(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false)
+	m.stage = shareStageSelectDevice
+	m.devices = []adb.Device{{Id: "emulator-5554"}, {Id: "R58M"}}
+	m.cursor = 1
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(*shareModel)
+	if m.stage != shareStageConnecting {
+		t.Fatalf("expected stage %v, got %v", shareStageConnecting, m.stage)
+	}
+	select {
+	case device := <-m.selectedDevice:
+		if device != "R58M" {
+			t.Fatalf("expected the highlighted device id, got %q", device)
+		}
+	default:
+		t.Fatalf("expected the selected device id to be queued")
+	}
+}
+
+func TestShareModelRefreshReturnsFetchCommand(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false)
+	m.stage = shareStageSelectDevice
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = updated.(*shareModel)
+	if m.stage != shareStageLoadingDevices {
+		t.Fatalf("expected stage %v, got %v", shareStageLoadingDevices, m.stage)
+	}
+	if cmd == nil {
+		t.Fatalf("expected a refresh command")
+	}
+}
+
+func TestShareModelHandlesOwnerRoomCreated(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false)
+	updated, _ := m.Update(ownerEventMsg{Kind: controller.OwnerRoomCreated, RoomId: "ROOM42"})
+	m = updated.(*shareModel)
+	if m.stage != shareStageRoomActive {
+		t.Fatalf("expected stage %v, got %v", shareStageRoomActive, m.stage)
+	}
+	if m.roomId != "ROOM42" {
+		t.Fatalf("expected room id %q, got %q", "ROOM42", m.roomId)
+	}
+}
+
+func TestShareModelLogsJoinActivity(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false)
+	updated, _ := m.Update(ownerEventMsg{Kind: controller.OwnerJoinRequested, GuestClientId: "GUEST1"})
+	m = updated.(*shareModel)
+	updated, _ = m.Update(ownerEventMsg{Kind: controller.OwnerJoinDecided, GuestClientId: "GUEST1", Accepted: true})
+	m = updated.(*shareModel)
+	if len(m.activity) != 2 {
+		t.Fatalf("expected 2 activity lines, got %d: %v", len(m.activity), m.activity)
+	}
+}
+
+func TestShareModelJoinRequestPromptAcceptDecline(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false)
+	m.stage = shareStageRoomActive
+	respond := make(chan bool, 1)
+
+	updated, _ := m.Update(joinRequestMsg{clientId: "GUEST1", respond: respond})
+	m = updated.(*shareModel)
+	if m.pendingGuestId != "GUEST1" || m.pendingRespond == nil {
+		t.Fatalf("expected a pending join request for GUEST1, got %+v", m)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+	m = updated.(*shareModel)
+	if m.pendingRespond != nil {
+		t.Fatalf("expected the pending request to be cleared after answering")
+	}
+	select {
+	case accepted := <-respond:
+		if !accepted {
+			t.Fatalf("expected 'y' to accept")
+		}
+	default:
+		t.Fatalf("expected an answer to be sent on the respond channel")
+	}
+}
+
+func TestShareModelJoinRequestDecline(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false)
+	m.stage = shareStageRoomActive
+	respond := make(chan bool, 1)
+	updated, _ := m.Update(joinRequestMsg{clientId: "GUEST1", respond: respond})
+	m = updated.(*shareModel)
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	m = updated.(*shareModel)
+	select {
+	case accepted := <-respond:
+		if accepted {
+			t.Fatalf("expected 'n' to decline")
+		}
+	default:
+		t.Fatalf("expected an answer to be sent on the respond channel")
+	}
+}
+
+func TestShareModelErrorStage(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false)
+	wantErr := errors.New("transporter connection lost")
+	updated, _ := m.Update(shareErrorMsg{wantErr})
+	m = updated.(*shareModel)
+	if m.stage != shareStageError || m.err != wantErr {
+		t.Fatalf("expected error stage with %v, got stage=%v err=%v", wantErr, m.stage, m.err)
+	}
+}
+
+func TestShareModelQuit(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false)
+	m.stage = shareStageSelectDevice
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd == nil {
+		t.Fatalf("expected a quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("expected the command to produce tea.QuitMsg")
+	}
+}
+
+func TestShareModelPendingRespondSwallowsQuit(t *testing.T) {
+	// While a join request is pending, 'q' isn't a recognized answer and
+	// must not be treated as global quit either (only y/n/ctrl+c apply),
+	// so the operator can't accidentally exit the TUI mid-decision without
+	// noticing.
+	m := newShareModel(context.Background(), nil, "", false)
+	m.stage = shareStageRoomActive
+	respond := make(chan bool, 1)
+	m.pendingGuestId = "GUEST1"
+	m.pendingRespond = respond
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	if cmd != nil {
+		t.Fatalf("expected 'q' to be ignored while a join request is pending")
+	}
+	select {
+	case <-respond:
+		t.Fatalf("expected no answer to be sent for an unrecognized key")
+	default:
+	}
+}

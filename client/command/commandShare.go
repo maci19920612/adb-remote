@@ -3,11 +3,10 @@ package command
 import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/config"
-	"adb-remote.maci.team/client/controller"
 	"adb-remote.maci.team/client/transportLayer"
+	"adb-remote.maci.team/client/tui"
 	"context"
 	"flag"
-	"fmt"
 	"log/slog"
 )
 
@@ -24,23 +23,12 @@ func CreateShareCommand(
 			if !ok {
 				return InvalidCommandArgumentType
 			}
-			fmt.Printf("Target device: %s\n", *typedArgs.TargetDevice)
-			if err := controller.Handshake(client); err != nil {
-				return err
-			}
-			acceptPrompt := controller.TTYAcceptPrompt
-			if *typedArgs.AutoAccept {
-				acceptPrompt = func(guestClientId string) (bool, error) {
-					fmt.Printf("Auto-accepting the room join request (clientId:%s)\n", guestClientId)
-					return true, nil
-				}
-			}
-			return controller.JoinAsRoomOwner(context.Background(), client, smartSocket, *typedArgs.TargetDevice, acceptPrompt)
+			return tui.RunShare(context.Background(), client, smartSocket, *typedArgs.TargetDevice, *typedArgs.AutoAccept)
 		},
 		ParameterFactory: func() (BaseCommand, error) {
 			flagSet := flag.NewFlagSet("share", flag.ExitOnError)
-			targetDevice := flagSet.String("targetDevice", "", "The target device ID what you want to share")
-			autoAccept := flagSet.Bool("yes", false, "Automatically accept every room join request instead of prompting on the TTY")
+			targetDevice := flagSet.String("targetDevice", "", "The device ID to share; skips the device picker if set")
+			autoAccept := flagSet.Bool("yes", false, "Automatically accept every room join request instead of prompting")
 			getHelp := flagSet.Bool("help", false, "Print this help")
 			return &commandShareArgs{
 				FlagSet:      flagSet,
