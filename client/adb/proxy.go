@@ -11,6 +11,17 @@ import (
 // default, for the local ADB server to "adb connect" to.
 const DefaultProxyPort = "5038"
 
+// deviceFeatures is advertised in our CNXN response's device banner. Most
+// importantly this must include shell_v2: without it, a real adb client
+// silently falls back to the legacy v1 "shell:" service, which relays
+// stdout/stderr fine but has no way to carry the remote command's exit
+// code back at all (adb always reports 0 regardless of what actually ran).
+// The rest mirror what a real, current adb-server/adbd pair commonly
+// support; if the underlying shared device doesn't actually support one,
+// that specific stream's OpenStream just fails, same as with any other
+// unsupported service request.
+const deviceFeatures = "shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,fixed_push_symlink_timestamp,abb_exec,remount_shell,track_app,sendrecv_v2"
+
 // IAdbProxy listens locally for a real ADB server to "adb connect" to,
 // performs the ADB CNXN handshake on its behalf (pretending to be a single
 // device named after the room), and hands the now-handshaked connection off
@@ -101,7 +112,11 @@ func (p *AdbProxy) handleConnection(ctx context.Context, conn net.Conn, roomId s
 	// advertise our own capacity here regardless of what the peer offered
 	// (real adb clients commonly offer up to 1MiB, far more than our
 	// fixed-size buffers hold).
-	if err := message.Set(CommandConnect, protocolVersion, MaxPayloadLength, []byte(fmt.Sprintf("device:wrapper-remote-%s", roomId))); err != nil {
+	banner := fmt.Sprintf(
+		"device::ro.product.name=adb-remote;ro.product.model=wrapper-remote-%s;ro.product.device=wrapper-remote-%s;features=%s",
+		roomId, roomId, deviceFeatures,
+	)
+	if err := message.Set(CommandConnect, protocolVersion, MaxPayloadLength, []byte(banner)); err != nil {
 		logger.Error(fmt.Sprintf("Failed to build the CNXN response: %s", err))
 		_ = conn.Close()
 		return

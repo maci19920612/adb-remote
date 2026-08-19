@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
@@ -58,9 +59,12 @@ func TestProxyCompletesHandshakeAndYieldsConnection(t *testing.T) {
 	if response.Command() != CommandConnect {
 		t.Fatalf("expected a CNXN response, got %x", response.Command())
 	}
-	expectedBanner := "device:wrapper-remote-ROOM42"
-	if response.DataString() != expectedBanner {
-		t.Fatalf("expected banner %q, got %q", expectedBanner, response.DataString())
+	banner := response.DataString()
+	if !strings.Contains(banner, "ROOM42") {
+		t.Fatalf("expected the banner to mention the room id, got %q", banner)
+	}
+	if !strings.Contains(banner, "features=") || !strings.Contains(banner, "shell_v2") {
+		t.Fatalf("expected the banner to advertise shell_v2 (without it, real adb clients silently lose exit codes), got %q", banner)
 	}
 
 	select {
