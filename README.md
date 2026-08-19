@@ -130,22 +130,33 @@ go run . connect --targetRoomId <ROOM_ID> --port 5038
 This shows your client id and the connection state as it progresses
 (`connecting to the transporter...` → `joining room...` →
 `ready — waiting for a local adb connection` → `relaying ADB traffic`, or
-an error/declined state), plus the command to run once it's ready:
+an error/declined state). You don't need to run `adb connect` yourself: as
+soon as the local proxy is up, it runs the equivalent of `adb connect
+127.0.0.1:<port>` automatically (via the same smartsocket protocol the real
+`adb` CLI uses — no external process involved), so your local `adb devices`
+picks up the shared device on its own:
 
 ```
 Your client id: QLHW5807
 Room id:        QNZQ5630
 
-Connection state: ready — waiting for a local adb connection
+Connection state: relaying ADB traffic
 
-Point your local adb at it with:
-  adb connect 127.0.0.1:5038
+Local proxy: 127.0.0.1:5038
+adb connect issued automatically
+
+(1 local adb connection(s) relayed so far)
 ```
 
 ```sh
-adb connect 127.0.0.1:5038
 adb -s 127.0.0.1:5038 shell
 ```
+
+If the automatic connect fails for some reason, the TUI shows the error and
+the command to run yourself as a fallback. Either way, `adb disconnect
+127.0.0.1:<port>` runs automatically when you quit (`q`) or the process
+exits for any other reason, so a stale entry doesn't linger in `adb
+devices`.
 
 `--port` defaults to `5038` (`adb.DefaultProxyPort`) and just needs to be a
 free local port.
@@ -205,8 +216,11 @@ the `sync:` protocol and multi-chunk flow control), and several concurrent
 - **The TUI itself**: verified with a real two-process, real-terminal (PTY)
   run — device list → refresh → select → room id, a real guest joining
   with its client id shown and accepted, and the guest side showing its
-  client id and connection state through to "ready". Model state
-  transitions are additionally unit-tested directly (`client/tui`).
+  client id and connection state all the way to "relaying ADB traffic" —
+  including the automatic `adb connect`/`adb disconnect`, confirmed against
+  `adb devices` before, during, and after the run (no stale entries left
+  behind on quit). Model state transitions are additionally unit-tested
+  directly (`client/tui`).
 
 ### Two ADB wire-format quirks that will break this against real `adb` if regressed
 
