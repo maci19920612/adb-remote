@@ -4,8 +4,10 @@ import (
 	"adb-remote.maci.team/shared/protocol"
 	"adb-remote.maci.team/shared/utils"
 	"adb-remote.maci.team/transporter/config"
+	"adb-remote.maci.team/transporter/tlsutil"
 	"container/list"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -57,12 +59,24 @@ func CreateConnectionManager(config *config.TransporterConfiguration, logger *sl
 	}
 }
 
-// StartServer starts listening and blocks until the server is stopped via
-// Stop or the listener fails permanently.
+// StartServer starts listening (over TLS, using a self-signed certificate
+// generated on first run and persisted thereafter — see transporter/tlsutil)
+// and blocks until the server is stopped via Stop or the listener fails
+// permanently.
 func (cm *ConnectionManager) StartServer() error {
 	logger := cm.logger
 	logger.Info("Starting the transporter server")
-	server, err := net.Listen("tcp", cm.config.Address)
+
+	cert, err := tlsutil.LoadOrCreateCertificate(cm.config.CertPath(), cm.config.KeyPath())
+	if err != nil {
+		logger.Error(fmt.Sprintf("Transporter TLS certificate could not be loaded/created: %s", err))
+		return err
+	}
+	if fingerprint, err := tlsutil.Fingerprint(cert); err == nil {
+		logger.Info(fmt.Sprintf("Transporter TLS certificate fingerprint: %s", fingerprint))
+	}
+
+	server, err := tls.Listen("tcp", cm.config.Address, &tls.Config{Certificates: []tls.Certificate{cert}})
 	if err != nil {
 		logger.Error(fmt.Sprintf("Transporter server can't be created: %s", err))
 		return err

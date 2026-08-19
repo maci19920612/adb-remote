@@ -38,3 +38,38 @@ func TestCreateConfigInvalidJson(t *testing.T) {
 		t.Fatalf("expected an error for invalid JSON")
 	}
 }
+
+func TestCertKeyPathDefaults(t *testing.T) {
+	config := &TransporterConfiguration{Address: "0.0.0.0:9000"}
+	if config.CertPath() != DefaultTLSCertFile {
+		t.Fatalf("expected the default cert path %q, got %q", DefaultTLSCertFile, config.CertPath())
+	}
+	if config.KeyPath() != DefaultTLSKeyFile {
+		t.Fatalf("expected the default key path %q, got %q", DefaultTLSKeyFile, config.KeyPath())
+	}
+}
+
+func TestCertKeyPathOverrides(t *testing.T) {
+	config := &TransporterConfiguration{
+		Address:     "0.0.0.0:9000",
+		TLSCertFile: "custom-cert.pem",
+		TLSKeyFile:  "custom-key.pem",
+	}
+	if config.CertPath() != "custom-cert.pem" {
+		t.Fatalf("expected the overridden cert path, got %q", config.CertPath())
+	}
+	if config.KeyPath() != "custom-key.pem" {
+		t.Fatalf("expected the overridden key path, got %q", config.KeyPath())
+	}
+}
+
+func TestCreateConfigParsesTLSPaths(t *testing.T) {
+	path := writeConfigFile(t, `{"transporterAddress": "0.0.0.0:9000", "tlsCertFile": "a.pem", "tlsKeyFile": "b.pem"}`)
+	config, err := CreateConfig(path)
+	if err != nil {
+		t.Fatalf("CreateConfig failed: %s", err)
+	}
+	if config.CertPath() != "a.pem" || config.KeyPath() != "b.pem" {
+		t.Fatalf("expected TLS paths a.pem/b.pem, got %q/%q", config.CertPath(), config.KeyPath())
+	}
+}

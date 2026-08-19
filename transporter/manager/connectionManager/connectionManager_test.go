@@ -3,9 +3,11 @@ package connectionManager
 import (
 	"adb-remote.maci.team/shared/protocol"
 	"adb-remote.maci.team/transporter/config"
+	"crypto/tls"
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -28,7 +30,12 @@ func freeLocalAddress(t *testing.T) string {
 func startTestServer(t *testing.T) (*ConnectionManager, string) {
 	t.Helper()
 	address := freeLocalAddress(t)
-	cm := CreateConnectionManager(&config.TransporterConfiguration{Address: address}, newTestLogger())
+	dir := t.TempDir()
+	cm := CreateConnectionManager(&config.TransporterConfiguration{
+		Address:     address,
+		TLSCertFile: filepath.Join(dir, "cert.pem"),
+		TLSKeyFile:  filepath.Join(dir, "key.pem"),
+	}, newTestLogger())
 
 	started := make(chan struct{})
 	go func() {
@@ -81,7 +88,7 @@ func performHandshake(t *testing.T, conn net.Conn) string {
 func TestHandshakeAssignsClientId(t *testing.T) {
 	_, address := startTestServer(t)
 
-	conn, err := net.Dial("tcp", address)
+	conn, err := tls.Dial("tcp", address, &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("failed to dial the server: %s", err)
 	}
@@ -96,7 +103,7 @@ func TestHandshakeAssignsClientId(t *testing.T) {
 func TestHandshakeRejectsProtocolVersionMismatch(t *testing.T) {
 	_, address := startTestServer(t)
 
-	conn, err := net.Dial("tcp", address)
+	conn, err := tls.Dial("tcp", address, &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("failed to dial the server: %s", err)
 	}
@@ -130,7 +137,7 @@ func TestHandshakeRejectsProtocolVersionMismatch(t *testing.T) {
 func TestHandshakeRejectsUnexpectedFirstCommand(t *testing.T) {
 	_, address := startTestServer(t)
 
-	conn, err := net.Dial("tcp", address)
+	conn, err := tls.Dial("tcp", address, &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("failed to dial the server: %s", err)
 	}
@@ -152,7 +159,7 @@ func TestHandshakeRejectsUnexpectedFirstCommand(t *testing.T) {
 func TestStopClosesActiveConnections(t *testing.T) {
 	cm, address := startTestServer(t)
 
-	conn, err := net.Dial("tcp", address)
+	conn, err := tls.Dial("tcp", address, &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("failed to dial the server: %s", err)
 	}
@@ -171,7 +178,7 @@ func TestStopClosesActiveConnections(t *testing.T) {
 func TestMessagesAfterHandshakeArriveOnClientMessageChannel(t *testing.T) {
 	cm, address := startTestServer(t)
 
-	conn, err := net.Dial("tcp", address)
+	conn, err := tls.Dial("tcp", address, &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("failed to dial the server: %s", err)
 	}

@@ -4,9 +4,11 @@ import (
 	"adb-remote.maci.team/shared/protocol"
 	"adb-remote.maci.team/transporter/config"
 	"adb-remote.maci.team/transporter/manager/connectionManager"
+	"crypto/tls"
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -31,7 +33,12 @@ func freeLocalAddress(t *testing.T) string {
 func startTestSystem(t *testing.T) string {
 	t.Helper()
 	address := freeLocalAddress(t)
-	cm := connectionManager.CreateConnectionManager(&config.TransporterConfiguration{Address: address}, newTestLogger())
+	dir := t.TempDir()
+	cm := connectionManager.CreateConnectionManager(&config.TransporterConfiguration{
+		Address:     address,
+		TLSCertFile: filepath.Join(dir, "cert.pem"),
+		TLSKeyFile:  filepath.Join(dir, "key.pem"),
+	}, newTestLogger())
 	rm := CreateRoomManager(cm, newTestLogger())
 
 	started := make(chan struct{})
@@ -66,7 +73,7 @@ type testClient struct {
 
 func dialTestClient(t *testing.T, address string) *testClient {
 	t.Helper()
-	conn, err := net.Dial("tcp", address)
+	conn, err := tls.Dial("tcp", address, &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		t.Fatalf("failed to dial the server: %s", err)
 	}
