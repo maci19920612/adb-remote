@@ -6,6 +6,7 @@ import (
 	"adb-remote.maci.team/shared/protocol"
 	"adb-remote.maci.team/shared/utils"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -60,9 +61,16 @@ func (c *Client) Messages() <-chan *MessageContainer {
 	return c.messageChannel
 }
 
+// Start dials the transporter over TLS. The transporter's certificate is
+// self-signed (see transporter/tlsutil) with no CA behind it, so this only
+// encrypts the connection against passive eavesdropping — it does not
+// authenticate the transporter, hence InsecureSkipVerify. Authenticating
+// who you're actually talking to end-to-end (the room owner/guest, not the
+// relay in between) is what client/identity's public-key fingerprints are
+// for, checked at the application layer during room join.
 func (c *Client) Start() error {
 	address := c.Config.TransporterAddress
-	connection, err := net.Dial("tcp", address)
+	connection, err := tls.Dial("tcp", address, &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		return err
 	}

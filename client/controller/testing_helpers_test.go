@@ -2,6 +2,7 @@ package controller
 
 import (
 	"adb-remote.maci.team/client/config"
+	"adb-remote.maci.team/client/internal/testtls"
 	"adb-remote.maci.team/client/transportLayer"
 	"adb-remote.maci.team/shared/protocol"
 	"io"
@@ -17,15 +18,11 @@ func newTestLogger() *slog.Logger {
 
 func fakeTransporter(t *testing.T) (address string, connections <-chan net.Conn) {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to start the fake transporter: %s", err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
+	listener := testtls.Listen(t)
 
 	ch := make(chan net.Conn, 1)
 	go func() {
-		conn, err := listener.Accept()
+		conn, err := testtls.Accept(listener)
 		if err != nil {
 			return
 		}
