@@ -5,7 +5,10 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // fakeAdbServer emulates the subset of the ADB "smart socket" host protocol
@@ -48,6 +51,69 @@ func writeSmartSocketResponse(conn net.Conn, body string) {
 	_, _ = conn.Write([]byte("OKAY"))
 	_, _ = conn.Write([]byte(fmt.Sprintf("%04x", len(body))))
 	_, _ = conn.Write([]byte(body))
+}
+
+// readSmartSocketCommand is safe to call from a goroutine other than the
+// test's own (unlike t.Fatalf, which must run on the test goroutine): on
+// any error it reports via t.Errorf and returns "", letting the caller bail
+// out on its own.
+func readSmartSocketCommand(t *testing.T, conn net.Conn) (string, bool) {
+	t.Helper()
+	lengthBuffer := make([]byte, 4)
+	if _, err := io.ReadFull(conn, lengthBuffer); err != nil {
+		return "", false
+	}
+	var length int
+	if _, err := fmt.Sscanf(string(lengthBuffer), "%04x", &length); err != nil {
+		t.Errorf("failed to parse the command length: %s", err)
+		return "", false
+	}
+	commandBuffer := make([]byte, length)
+	if _, err := io.ReadFull(conn, commandBuffer); err != nil {
+		t.Errorf("failed to read the command: %s", err)
+		return "", false
+	}
+	return string(commandBuffer), true
+}
+
+// fakeAdbTransportServer accepts any number of connections, expects each to
+// select a transport first (always accepted), then hands the connection and
+// the second (service) command off to handle.
+func fakeAdbTransportServer(t *testing.T, handle func(service string, conn net.Conn)) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to start the fake adb server: %s", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				transportCmd, ok := readSmartSocketCommand(t, conn)
+				if !ok {
+					return
+				}
+				if !strings.HasPrefix(transportCmd, "host:transport:") {
+					t.Errorf("expected a host:transport: command, got %q", transportCmd)
+					return
+				}
+				_, _ = conn.Write([]byte("OKAY"))
+				service, ok := readSmartSocketCommand(t, conn)
+				if !ok {
+					return
+				}
+				handle(service, conn)
+			}()
+		}
+	}()
+
+	return listener.Addr().String()
 }
 
 func newTestSmartSocket(address string) *AdbSmartSocket {
@@ -152,4 +218,87 @@ func TestTransportFailurePropagatesServerError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected an error from Transport")
 	}
+}
+
+func TestOpenStreamReturnsConnectionOnSuccess(t *testing.T) {
+	address := fakeAdbTransportServer(t, func(service string, conn net.Conn) {
+		if service != "shell,v2,raw:echo hi" {
+			t.Errorf("unexpected service: %q", service)
+		}
+		_, _ = conn.Write([]byte("OKAY"))
+		_, _ = conn.Write([]byte("stream-bytes"))
+	})
+
+	socket := newTestSmartSocket(address)
+	conn, err := socket.OpenStream("emulator-5554", "shell,v2,raw:echo hi")
+	if err != nil {
+		t.Fatalf("OpenStream failed: %s", err)
+	}
+	defer conn.Close()
+
+	buffer := make([]byte, len("stream-bytes"))
+	if _, err := io.ReadFull(conn, buffer); err != nil {
+		t.Fatalf("failed to read the stream bytes: %s", err)
+	}
+	if string(buffer) != "stream-bytes" {
+		t.Fatalf("expected %q, got %q", "stream-bytes", buffer)
+	}
+}
+
+func TestOpenStreamPropagatesServiceFailure(t *testing.T) {
+	address := fakeAdbTransportServer(t, func(service string, conn net.Conn) {
+		_, _ = conn.Write([]byte("FAIL"))
+		body := "unknown service"
+		_, _ = conn.Write([]byte(fmt.Sprintf("%04x", len(body))))
+		_, _ = conn.Write([]byte(body))
+	})
+
+	socket := newTestSmartSocket(address)
+	_, err := socket.OpenStream("emulator-5554", "bogus:")
+	if err == nil {
+		t.Fatalf("expected an error from OpenStream")
+	}
+	if err.Error() != "unknown service" {
+		t.Fatalf("expected the server error message to propagate, got: %s", err)
+	}
+}
+
+// TestOpenStreamConcurrentCallsDoNotCorruptEachOther exercises many
+// concurrent OpenStream calls against distinct services: AdbSmartSocket
+// used to keep its handshake scratch buffers as shared struct fields, which
+// would corrupt concurrent handshakes since the owner-side relay opens one
+// stream per guest OPEN, potentially many at once.
+func TestOpenStreamConcurrentCallsDoNotCorruptEachOther(t *testing.T) {
+	const streamCount = 20
+	address := fakeAdbTransportServer(t, func(service string, conn net.Conn) {
+		_, _ = conn.Write([]byte("OKAY"))
+		_, _ = conn.Write([]byte(service)) // echo the service name back as the "stream data"
+	})
+
+	socket := newTestSmartSocket(address)
+	var wg sync.WaitGroup
+	for i := 0; i < streamCount; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			service := fmt.Sprintf("shell,v2,raw:stream-%d", i)
+			conn, err := socket.OpenStream("emulator-5554", service)
+			if err != nil {
+				t.Errorf("OpenStream(%d) failed: %s", i, err)
+				return
+			}
+			defer conn.Close()
+
+			buffer := make([]byte, len(service))
+			_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+			if _, err := io.ReadFull(conn, buffer); err != nil {
+				t.Errorf("stream %d: failed to read echoed service: %s", i, err)
+				return
+			}
+			if string(buffer) != service {
+				t.Errorf("stream %d: expected echoed service %q, got %q", i, service, buffer)
+			}
+		}(i)
+	}
+	wg.Wait()
 }
