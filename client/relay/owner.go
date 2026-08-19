@@ -4,6 +4,7 @@ import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/transportLayer"
 	"adb-remote.maci.team/shared/protocol"
+	"adb-remote.maci.team/shared/utils"
 	"context"
 	"fmt"
 	"log/slog"
@@ -12,6 +13,17 @@ import (
 	"sync"
 	"sync/atomic"
 )
+
+// adbMessagePool recycles *adb.AdbMessage buffers (each ~32KB, sized for
+// MaxPayloadLength regardless of how much data a given message actually
+// carries) across sendOkay/sendWrite/sendClose calls. Without this, every
+// relayed WRTE and every OKAY acking a guest's WRTE allocated a fresh
+// buffer — on the throughput-critical owner->guest path (e.g. a large "adb
+// pull") that meant tens of thousands of 32KB allocations per second.
+// Obtain/Dispose are safe to call concurrently from many goroutines (one
+// per open stream, plus the multiplexer's own dispatch goroutine), same as
+// the transportLayer.Client message pool this mirrors.
+var adbMessagePool = utils.NewObjectPool(adb.CreateMessage)
 
 // ownerStream tracks one multiplexed ADB stream on the owner side: a single
 // service invocation (e.g. one "adb shell" or "adb sync" session) relayed
@@ -282,7 +294,12 @@ func (m *OwnerMultiplexer) closeAllStreams() {
 }
 
 func (m *OwnerMultiplexer) sendOkay(ownId uint32, guestId uint32) error {
-	message := adb.CreateMessage()
+	container := adbMessagePool.Obtain()
+	defer container.Dispose()
+	message, err := container.Data()
+	if err != nil {
+		return err
+	}
 	if err := message.Set(adb.CommandOkay, ownId, guestId, nil); err != nil {
 		return err
 	}
@@ -290,7 +307,12 @@ func (m *OwnerMultiplexer) sendOkay(ownId uint32, guestId uint32) error {
 }
 
 func (m *OwnerMultiplexer) sendWrite(ownId uint32, guestId uint32, data []byte) error {
-	message := adb.CreateMessage()
+	container := adbMessagePool.Obtain()
+	defer container.Dispose()
+	message, err := container.Data()
+	if err != nil {
+		return err
+	}
 	if err := message.Set(adb.CommandWrite, ownId, guestId, data); err != nil {
 		return err
 	}
@@ -298,7 +320,12 @@ func (m *OwnerMultiplexer) sendWrite(ownId uint32, guestId uint32, data []byte) 
 }
 
 func (m *OwnerMultiplexer) sendClose(ownId uint32, guestId uint32) error {
-	message := adb.CreateMessage()
+	container := adbMessagePool.Obtain()
+	defer container.Dispose()
+	message, err := container.Data()
+	if err != nil {
+		return err
+	}
 	if err := message.Set(adb.CommandClose, ownId, guestId, nil); err != nil {
 		return err
 	}
