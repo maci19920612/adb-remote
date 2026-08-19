@@ -249,6 +249,22 @@ func TestShareModelJoinRequestDecline(t *testing.T) {
 	}
 }
 
+func TestShareModelSessionTimeoutQuits(t *testing.T) {
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m.stage = shareStageRoomActive
+	updated, cmd := m.Update(sessionTimeoutMsg{})
+	sm := updated.(*shareModel)
+	if sm.stage != shareStageSessionTimeout {
+		t.Fatalf("expected stage %v, got %v", shareStageSessionTimeout, sm.stage)
+	}
+	if cmd == nil {
+		t.Fatalf("expected a quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatalf("expected the command to produce tea.QuitMsg")
+	}
+}
+
 func TestShareModelErrorStage(t *testing.T) {
 	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
 	wantErr := errors.New("transporter connection lost")

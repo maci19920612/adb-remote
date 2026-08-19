@@ -8,6 +8,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -19,6 +21,7 @@ const (
 	shareStageSelectDevice
 	shareStageConnecting
 	shareStageRoomActive
+	shareStageSessionTimeout
 	shareStageError
 )
 
@@ -76,15 +79,18 @@ func newShareModel(ctx context.Context, smartSocket adb.IAdbSmartSocket, presetD
 
 // RunShare runs the interactive share TUI to completion. If presetDevice is
 // non-empty, the device picker is skipped. If autoAccept is true, join
-// requests are accepted automatically instead of prompting.
-func RunShare(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, ownerIdentity *identity.Identity, presetDevice string, autoAccept bool) error {
+// requests are accepted automatically instead of prompting. sessionTimeout
+// closes the room (and this process) once it elapses after the room is
+// created; a zero or negative value (including the documented -1 CLI
+// sentinel) disables the timeout.
+func RunShare(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, ownerIdentity *identity.Identity, presetDevice string, autoAccept bool, sessionTimeout time.Duration) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	m := newShareModel(ctx, smartSocket, presetDevice, autoAccept, ownerIdentity.Fingerprint())
 	program := tea.NewProgram(m)
 
-	go runOwnerFlow(ctx, program, m, client, smartSocket, ownerIdentity, autoAccept)
+	go runOwnerFlow(ctx, program, m, client, smartSocket, ownerIdentity, autoAccept, sessionTimeout)
 
 	_, err := program.Run()
 	cancel()
@@ -97,7 +103,7 @@ func RunShare(ctx context.Context, client *transportLayer.Client, smartSocket ad
 // runOwnerFlow waits for a device to be selected, then performs the
 // handshake and services the room, forwarding every state change into the
 // TUI as a message.
-func runOwnerFlow(ctx context.Context, program *tea.Program, m *shareModel, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, ownerIdentity *identity.Identity, autoAccept bool) {
+func runOwnerFlow(ctx context.Context, program *tea.Program, m *shareModel, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, ownerIdentity *identity.Identity, autoAccept bool, sessionTimeout time.Duration) {
 	var deviceId string
 	select {
 	case deviceId = <-m.selectedDevice:
@@ -125,11 +131,29 @@ func runOwnerFlow(ctx context.Context, program *tea.Program, m *shareModel, clie
 			return false, ctx.Err()
 		}
 	}
+
+	// ownerCtx derives from ctx so the timeout can stop JoinAsRoomOwner (and
+	// so close the room) without needing the outer RunShare's cancel func;
+	// timedOut distinguishes an expiry-triggered stop from any other reason
+	// ownerCtx might end up cancelled, so the generic error path below
+	// doesn't clobber the timeout message already sent to the TUI.
+	ownerCtx, cancelOwner := context.WithCancel(ctx)
+	defer cancelOwner()
+	var timedOut atomic.Bool
+	if sessionTimeout > 0 {
+		timer := time.AfterFunc(sessionTimeout, func() {
+			timedOut.Store(true)
+			program.Send(sessionTimeoutMsg{})
+			cancelOwner()
+		})
+		defer timer.Stop()
+	}
+
 	onEvent := func(e controller.OwnerEvent) {
 		program.Send(ownerEventMsg(e))
 	}
 
-	if err := controller.JoinAsRoomOwner(ctx, client, smartSocket, deviceId, ownerIdentity, promptAccept, onEvent); err != nil && ctx.Err() == nil {
+	if err := controller.JoinAsRoomOwner(ownerCtx, client, smartSocket, deviceId, ownerIdentity, promptAccept, onEvent); err != nil && ctx.Err() == nil && !timedOut.Load() {
 		program.Send(shareErrorMsg{err})
 	}
 }
@@ -152,6 +176,8 @@ type joinRequestMsg struct {
 }
 
 type shareErrorMsg struct{ err error }
+
+type sessionTimeoutMsg struct{}
 
 func fetchDevices(smartSocket adb.IAdbSmartSocket) tea.Cmd {
 	return func() tea.Msg {
@@ -196,6 +222,9 @@ func (m *shareModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg.err
 		m.stage = shareStageError
 		return m, nil
+	case sessionTimeoutMsg:
+		m.stage = shareStageSessionTimeout
+		return m, tea.Quit
 	}
 	return m, nil
 }
@@ -348,6 +377,8 @@ func (m *shareModel) View() string {
 			b.WriteString("\n")
 		}
 		b.WriteString(helpStyle.Render("q quit"))
+	case shareStageSessionTimeout:
+		b.WriteString(errorStyle.Render("Session timeout reached — closing the room.") + "\n\n")
 	case shareStageError:
 		b.WriteString(errorStyle.Render(fmt.Sprintf("Error: %s", m.err)) + "\n\n")
 		b.WriteString(helpStyle.Render("q quit"))
