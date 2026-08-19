@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -49,6 +50,10 @@ type connectModel struct {
 
 	relayCount   int
 	lastRelayErr error
+
+	statsSource   transferStatsSource
+	stats         transferStats
+	width, height int
 }
 
 // RunConnect runs the interactive connect TUI to completion. It does not
@@ -59,8 +64,8 @@ func RunConnect(ctx context.Context, client *transportLayer.Client, smartSocket 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	m := &connectModel{roomId: roomId, localPort: localPort, fingerprint: guestIdentity.Fingerprint(), stage: connectStageConnecting}
-	program := tea.NewProgram(m)
+	m := &connectModel{roomId: roomId, localPort: localPort, fingerprint: guestIdentity.Fingerprint(), stage: connectStageConnecting, statsSource: client}
+	program := tea.NewProgram(m, tea.WithAltScreen())
 
 	guestFlowDone := make(chan struct{})
 	go func() {
@@ -116,11 +121,13 @@ type connectErrorMsg struct{ err error }
 // --- bubbletea.Model ---
 
 func (m *connectModel) Init() tea.Cmd {
-	return nil
+	return tickTransferStats()
 }
 
 func (m *connectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" || msg.String() == "q" {
 			return m, tea.Quit
@@ -134,6 +141,8 @@ func (m *connectModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case connectErrorMsg:
 		m.err = msg.err
 		m.stage = connectStageError
+	case transferTickMsg:
+		return m, m.stats.sample(m.statsSource, time.Time(msg))
 	}
 	return m, nil
 }
@@ -210,7 +219,7 @@ func (m *connectModel) View() string {
 	}
 
 	b.WriteString(helpStyle.Render("q quit"))
-	return b.String()
+	return layoutWithFooter(b.String(), m.stats.render(), m.height)
 }
 
 func (m *connectModel) stateLine() string {

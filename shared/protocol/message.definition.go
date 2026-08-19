@@ -38,6 +38,12 @@ func (m *TransporterMessage) PayloadCRC32() uint32 {
 	return ByteOrder.Uint32(m.payloadCrc32Buffer)
 }
 
+// WireSize returns the total number of bytes this message occupies on the
+// wire (header plus payload), i.e. exactly what a Read/Write call transfers.
+func (m *TransporterMessage) WireSize() uint32 {
+	return HeaderSize + m.PayloadLength()
+}
+
 // Payload returns the raw payload bytes currently held by the message,
 // sliced to the length recorded in the header.
 func (m *TransporterMessage) Payload() []byte {

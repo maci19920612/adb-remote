@@ -11,7 +11,7 @@ import (
 )
 
 func TestShareModelInitFetchesDevicesWhenNoPreset(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	if m.stage != shareStageLoadingDevices {
 		t.Fatalf("expected stage %v, got %v", shareStageLoadingDevices, m.stage)
 	}
@@ -21,12 +21,14 @@ func TestShareModelInitFetchesDevicesWhenNoPreset(t *testing.T) {
 }
 
 func TestShareModelInitSkipsPickerWithPresetDevice(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "emulator-5554", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "emulator-5554", false, "FP-TEST", nil)
 	if m.stage != shareStageConnecting {
 		t.Fatalf("expected stage %v, got %v", shareStageConnecting, m.stage)
 	}
-	if cmd := m.Init(); cmd != nil {
-		t.Fatalf("expected no Init command when a device is preset")
+	if cmd := m.Init(); cmd == nil {
+		// Init always starts the transfer-stats ticker regardless of stage;
+		// what a preset device skips is fetchDevices specifically.
+		t.Fatalf("expected the transfer-stats ticker command even with a preset device")
 	}
 	select {
 	case device := <-m.selectedDevice:
@@ -39,7 +41,7 @@ func TestShareModelInitSkipsPickerWithPresetDevice(t *testing.T) {
 }
 
 func TestShareModelDevicesLoadedPopulatesList(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	devices := []adb.Device{{Id: "emulator-5554", Type: adb.TypeDevice}, {Id: "R58M", Type: adb.TypeDevice}}
 	updated, _ := m.Update(devicesLoadedMsg{devices: devices})
 	sm := updated.(*shareModel)
@@ -52,7 +54,7 @@ func TestShareModelDevicesLoadedPopulatesList(t *testing.T) {
 }
 
 func TestShareModelDevicesLoadedError(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	wantErr := errors.New("adb not running")
 	updated, _ := m.Update(devicesLoadedMsg{err: wantErr})
 	sm := updated.(*shareModel)
@@ -62,7 +64,7 @@ func TestShareModelDevicesLoadedError(t *testing.T) {
 }
 
 func TestShareModelCursorNavigation(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	m.stage = shareStageSelectDevice
 	m.devices = []adb.Device{{Id: "a"}, {Id: "b"}, {Id: "c"}}
 
@@ -86,7 +88,7 @@ func TestShareModelCursorNavigation(t *testing.T) {
 }
 
 func TestShareModelEnterSelectsDevice(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	m.stage = shareStageSelectDevice
 	m.devices = []adb.Device{{Id: "emulator-5554"}, {Id: "R58M"}}
 	m.cursor = 1
@@ -107,7 +109,7 @@ func TestShareModelEnterSelectsDevice(t *testing.T) {
 }
 
 func TestShareModelRefreshReturnsFetchCommand(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	m.stage = shareStageSelectDevice
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
 	m = updated.(*shareModel)
@@ -120,7 +122,7 @@ func TestShareModelRefreshReturnsFetchCommand(t *testing.T) {
 }
 
 func TestShareModelHandlesOwnerRoomCreated(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	updated, _ := m.Update(ownerEventMsg{Kind: controller.OwnerRoomCreated, RoomId: "ROOM42"})
 	m = updated.(*shareModel)
 	if m.stage != shareStageRoomActive {
@@ -132,7 +134,7 @@ func TestShareModelHandlesOwnerRoomCreated(t *testing.T) {
 }
 
 func TestShareModelLogsJoinActivity(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	updated, _ := m.Update(ownerEventMsg{Kind: controller.OwnerJoinRequested, GuestClientId: "GUEST1"})
 	m = updated.(*shareModel)
 	updated, _ = m.Update(ownerEventMsg{Kind: controller.OwnerJoinDecided, GuestClientId: "GUEST1", Accepted: true})
@@ -143,7 +145,7 @@ func TestShareModelLogsJoinActivity(t *testing.T) {
 }
 
 func TestShareModelTracksConnectedGuestOnAccept(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	guestPublicKey := []byte{0x01, 0x02, 0x03}
 	updated, _ := m.Update(ownerEventMsg{Kind: controller.OwnerJoinDecided, GuestClientId: "GUEST1", GuestPublicKey: guestPublicKey, Accepted: true})
 	m = updated.(*shareModel)
@@ -156,7 +158,7 @@ func TestShareModelTracksConnectedGuestOnAccept(t *testing.T) {
 }
 
 func TestShareModelDoesNotTrackConnectedGuestOnDecline(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	updated, _ := m.Update(ownerEventMsg{Kind: controller.OwnerJoinDecided, GuestClientId: "GUEST1", Accepted: false})
 	m = updated.(*shareModel)
 	if m.connectedGuestId != "" {
@@ -165,7 +167,7 @@ func TestShareModelDoesNotTrackConnectedGuestOnDecline(t *testing.T) {
 }
 
 func TestShareModelClearsConnectedGuestOnGuestLeft(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	updated, _ := m.Update(ownerEventMsg{Kind: controller.OwnerJoinDecided, GuestClientId: "GUEST1", GuestPublicKey: []byte{1, 2, 3}, Accepted: true})
 	m = updated.(*shareModel)
 	if m.connectedGuestId != "GUEST1" {
@@ -183,7 +185,7 @@ func TestShareModelClearsConnectedGuestOnGuestLeft(t *testing.T) {
 }
 
 func TestShareModelGuestLeftClearsPendingPrompt(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	m.stage = shareStageRoomActive
 	respond := make(chan bool, 1)
 	updated, _ := m.Update(joinRequestMsg{clientId: "GUEST1", fingerprint: "FP-GUEST", respond: respond})
@@ -205,7 +207,7 @@ func TestShareModelGuestLeftClearsPendingPrompt(t *testing.T) {
 }
 
 func TestShareModelJoinRequestPromptAcceptDecline(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	m.stage = shareStageRoomActive
 	respond := make(chan bool, 1)
 
@@ -231,7 +233,7 @@ func TestShareModelJoinRequestPromptAcceptDecline(t *testing.T) {
 }
 
 func TestShareModelJoinRequestDecline(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	m.stage = shareStageRoomActive
 	respond := make(chan bool, 1)
 	updated, _ := m.Update(joinRequestMsg{clientId: "GUEST1", respond: respond})
@@ -250,7 +252,7 @@ func TestShareModelJoinRequestDecline(t *testing.T) {
 }
 
 func TestShareModelSessionTimeoutQuits(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	m.stage = shareStageRoomActive
 	updated, cmd := m.Update(sessionTimeoutMsg{})
 	sm := updated.(*shareModel)
@@ -266,7 +268,7 @@ func TestShareModelSessionTimeoutQuits(t *testing.T) {
 }
 
 func TestShareModelErrorStage(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	wantErr := errors.New("transporter connection lost")
 	updated, _ := m.Update(shareErrorMsg{wantErr})
 	m = updated.(*shareModel)
@@ -276,7 +278,7 @@ func TestShareModelErrorStage(t *testing.T) {
 }
 
 func TestShareModelQuit(t *testing.T) {
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	m.stage = shareStageSelectDevice
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	if cmd == nil {
@@ -292,7 +294,7 @@ func TestShareModelPendingRespondSwallowsQuit(t *testing.T) {
 	// must not be treated as global quit either (only y/n/ctrl+c apply),
 	// so the operator can't accidentally exit the TUI mid-decision without
 	// noticing.
-	m := newShareModel(context.Background(), nil, "", false, "FP-TEST")
+	m := newShareModel(context.Background(), nil, "", false, "FP-TEST", nil)
 	m.stage = shareStageRoomActive
 	respond := make(chan bool, 1)
 	m.pendingGuestId = "GUEST1"

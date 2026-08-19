@@ -59,9 +59,13 @@ type shareModel struct {
 	connectedGuestFingerprint string
 
 	activity []string
+
+	statsSource   transferStatsSource
+	stats         transferStats
+	width, height int
 }
 
-func newShareModel(ctx context.Context, smartSocket adb.IAdbSmartSocket, presetDevice string, autoAccept bool, fingerprint string) *shareModel {
+func newShareModel(ctx context.Context, smartSocket adb.IAdbSmartSocket, presetDevice string, autoAccept bool, fingerprint string, statsSource transferStatsSource) *shareModel {
 	m := &shareModel{
 		ctx:            ctx,
 		smartSocket:    smartSocket,
@@ -69,6 +73,7 @@ func newShareModel(ctx context.Context, smartSocket adb.IAdbSmartSocket, presetD
 		fingerprint:    fingerprint,
 		selectedDevice: make(chan string, 1),
 		stage:          shareStageLoadingDevices,
+		statsSource:    statsSource,
 	}
 	if presetDevice != "" {
 		m.stage = shareStageConnecting
@@ -87,8 +92,8 @@ func RunShare(ctx context.Context, client *transportLayer.Client, smartSocket ad
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	m := newShareModel(ctx, smartSocket, presetDevice, autoAccept, ownerIdentity.Fingerprint())
-	program := tea.NewProgram(m)
+	m := newShareModel(ctx, smartSocket, presetDevice, autoAccept, ownerIdentity.Fingerprint(), client)
+	program := tea.NewProgram(m, tea.WithAltScreen())
 
 	go runOwnerFlow(ctx, program, m, client, smartSocket, ownerIdentity, autoAccept, sessionTimeout)
 
@@ -190,13 +195,18 @@ func fetchDevices(smartSocket adb.IAdbSmartSocket) tea.Cmd {
 
 func (m *shareModel) Init() tea.Cmd {
 	if m.stage == shareStageConnecting {
-		return nil
+		return tickTransferStats()
 	}
-	return fetchDevices(m.smartSocket)
+	return tea.Batch(fetchDevices(m.smartSocket), tickTransferStats())
 }
 
 func (m *shareModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width, m.height = msg.Width, msg.Height
+		return m, nil
+	case transferTickMsg:
+		return m, m.stats.sample(m.statsSource, time.Time(msg))
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	case devicesLoadedMsg:
@@ -384,5 +394,5 @@ func (m *shareModel) View() string {
 		b.WriteString(helpStyle.Render("q quit"))
 	}
 
-	return b.String()
+	return layoutWithFooter(b.String(), m.stats.render(), m.height)
 }

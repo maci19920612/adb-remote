@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 )
 
 const messageChannelBufferSize = 0
@@ -32,6 +33,13 @@ type Client struct {
 	writeMutex sync.Mutex
 
 	messageChannel chan *MessageContainer
+
+	// bytesSent/bytesReceived count total wire bytes (header+payload) across
+	// every message, for the TUI's transfer-stats footer. Accessed
+	// concurrently from writeMessage (any sender goroutine) and startReader
+	// (the one reader goroutine).
+	bytesSent     atomic.Uint64
+	bytesReceived atomic.Uint64
 
 	//Dependencies
 	transporterMessagePool *utils.ObjectPool[protocol.TransporterMessage]
@@ -108,6 +116,7 @@ func (c *Client) startReader(ctx context.Context) {
 			_ = container.Dispose()
 			return
 		}
+		c.bytesReceived.Add(uint64(message.WireSize()))
 		select {
 		case c.messageChannel <- container:
 		case <-ctx.Done():
@@ -132,7 +141,22 @@ func (c *Client) Close() {
 func (c *Client) writeMessage(m *protocol.TransporterMessage) error {
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
-	return m.Write(c.connection)
+	if err := m.Write(c.connection); err != nil {
+		return err
+	}
+	c.bytesSent.Add(uint64(m.WireSize()))
+	return nil
+}
+
+// BytesSent and BytesReceived report the total wire bytes (header+payload,
+// across every message) sent and received on this connection so far, for
+// display (e.g. the TUI's transfer-stats footer). Safe for concurrent use.
+func (c *Client) BytesSent() uint64 {
+	return c.bytesSent.Load()
+}
+
+func (c *Client) BytesReceived() uint64 {
+	return c.bytesReceived.Load()
 }
 
 // withMessage obtains a pooled message, hands it to fn, and disposes of it

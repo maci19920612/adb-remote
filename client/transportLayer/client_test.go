@@ -174,6 +174,43 @@ func TestMessagesChannelDeliversIncomingMessages(t *testing.T) {
 	}
 }
 
+// TestBytesSentAndReceivedTrackWireTraffic is a regression test for the
+// transfer-stats footer's data source: BytesSent/BytesReceived must reflect
+// the total wire size (header+payload) of every message actually
+// written/read, not just payload bytes or message counts.
+func TestBytesSentAndReceivedTrackWireTraffic(t *testing.T) {
+	client, server := newConnectedTestClient(t)
+
+	if client.BytesSent() != 0 || client.BytesReceived() != 0 {
+		t.Fatalf("expected zero counters on a fresh client, got sent=%d received=%d", client.BytesSent(), client.BytesReceived())
+	}
+
+	if err := client.SendJoinRoom("ROOM7", []byte{1, 2, 3}); err != nil {
+		t.Fatalf("SendJoinRoom failed: %s", err)
+	}
+	sent := readMessage(t, server)
+	wantSent := uint64(sent.WireSize())
+	if got := client.BytesSent(); got != wantSent {
+		t.Fatalf("expected BytesSent %d after one message, got %d", wantSent, got)
+	}
+
+	incoming := protocol.CreateTransporterMessage()
+	incoming.SetResponseCommand(protocol.CommandJoinRoom)
+	if err := incoming.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{Accepted: 1}); err != nil {
+		t.Fatalf("SetPayloadConnectRoomResult failed: %s", err)
+	}
+	wantReceived := uint64(incoming.WireSize())
+	if err := incoming.Write(server); err != nil {
+		t.Fatalf("failed to write from the server: %s", err)
+	}
+	container := <-client.Messages()
+	defer container.Dispose()
+
+	if got := client.BytesReceived(); got != wantReceived {
+		t.Fatalf("expected BytesReceived %d after one message, got %d", wantReceived, got)
+	}
+}
+
 func TestCloseStopsReaderWithoutPanicking(t *testing.T) {
 	client, _ := newConnectedTestClient(t)
 	client.Close()

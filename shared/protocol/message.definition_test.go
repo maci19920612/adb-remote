@@ -52,6 +52,17 @@ func TestSetRawPayloadTooLarge(t *testing.T) {
 	}
 }
 
+func TestWireSize(t *testing.T) {
+	m := CreateTransporterMessage()
+	m.SetDirectCommand(CommandJoinRoom)
+	if err := m.SetRawPayload([]byte("payload-data")); err != nil {
+		t.Fatalf("SetRawPayload failed: %s", err)
+	}
+	if want := HeaderSize + uint32(len("payload-data")); m.WireSize() != want {
+		t.Fatalf("expected wire size %d, got %d", want, m.WireSize())
+	}
+}
+
 func TestWriteThenReadRoundTrip(t *testing.T) {
 	m := CreateTransporterMessage()
 	m.SetDirectCommand(CommandJoinRoom)
