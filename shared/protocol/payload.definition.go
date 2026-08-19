@@ -173,22 +173,53 @@ func (m *TransporterMessage) SetPayloadConnectRoom(data *TransporterMessagePaylo
 //endregion
 
 // region Connect to room response
+
+// TransporterMessagePayloadConnectRoomResult carries the owner's
+// accept/decline decision back to the guest. ClientId and PublicKey are the
+// room owner's identity (see client/identity): the client sets only
+// Accepted and PublicKey when sending this from the owner, and the
+// transporter fills in ClientId (which it already knows from the owner's
+// connection) before forwarding to the guest, mirroring how
+// TransporterMessagePayloadConnectRoom's ClientId is filled in for the
+// guest->owner direction. The guest displays the owner's fingerprint so the
+// operator can verify it out of band, symmetric with the owner verifying
+// the guest's.
 type TransporterMessagePayloadConnectRoomResult struct {
-	Accepted int //0 = false, anything else true
+	Accepted  int //0 = false, anything else true
+	ClientId  string
+	PublicKey []byte
 }
 
 func (m *TransporterMessage) GetPayloadConnectRoomResponse() (*TransporterMessagePayloadConnectRoomResult, error) {
-	_, accepted, err := m.readInt(0)
+	offset, accepted, err := m.readInt(0)
+	if err != nil {
+		return nil, err
+	}
+	offset, clientId, err := m.readString(offset)
+	if err != nil {
+		return nil, err
+	}
+	_, publicKey, err := m.readString(offset)
 	if err != nil {
 		return nil, err
 	}
 	return &TransporterMessagePayloadConnectRoomResult{
-		Accepted: accepted,
+		Accepted:  accepted,
+		ClientId:  clientId,
+		PublicKey: []byte(publicKey),
 	}, nil
 }
 
 func (m *TransporterMessage) SetPayloadConnectRoomResult(data *TransporterMessagePayloadConnectRoomResult) error {
-	payloadLength, err := m.writeInt(0, data.Accepted)
+	offset, err := m.writeInt(0, data.Accepted)
+	if err != nil {
+		return err
+	}
+	offset, err = m.writeString(offset, data.ClientId)
+	if err != nil {
+		return err
+	}
+	payloadLength, err := m.writeString(offset, string(data.PublicKey))
 	if err != nil {
 		return err
 	}

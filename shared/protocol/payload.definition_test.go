@@ -124,6 +124,31 @@ func TestConnectRoomResultPayloadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConnectRoomResultPayloadWithOwnerIdentityRoundTrip(t *testing.T) {
+	m := CreateTransporterMessage()
+	ownerPublicKey := []byte{0x00, 0x01, 0xff, 0xfe, 0x7f}
+	if err := m.SetPayloadConnectRoomResult(&TransporterMessagePayloadConnectRoomResult{
+		Accepted:  1,
+		ClientId:  "OWNER-A",
+		PublicKey: ownerPublicKey,
+	}); err != nil {
+		t.Fatalf("SetPayloadConnectRoomResult failed: %s", err)
+	}
+	payload, err := m.GetPayloadConnectRoomResponse()
+	if err != nil {
+		t.Fatalf("GetPayloadConnectRoomResponse failed: %s", err)
+	}
+	if payload.Accepted != 1 {
+		t.Fatalf("expected accepted=1, got %d", payload.Accepted)
+	}
+	if payload.ClientId != "OWNER-A" {
+		t.Fatalf("expected client id %q, got %q", "OWNER-A", payload.ClientId)
+	}
+	if !bytes.Equal(payload.PublicKey, ownerPublicKey) {
+		t.Fatalf("expected public key %x, got %x", ownerPublicKey, payload.PublicKey)
+	}
+}
+
 func TestReadIntRejectsTruncatedBuffer(t *testing.T) {
 	m := CreateTransporterMessage()
 	if err := m.SetRawPayload([]byte{1, 2}); err != nil {
