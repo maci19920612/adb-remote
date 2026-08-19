@@ -104,7 +104,7 @@ func roomJoinStep(client *transportLayer.Client, guestIdentity *identity.Identit
 		return err
 	}
 	accepted := payload.Accepted != 0
-	emitGuest(onEvent, GuestEvent{Kind: GuestJoinDecided, Accepted: accepted})
+	emitGuest(onEvent, GuestEvent{Kind: GuestJoinDecided, Accepted: accepted, OwnerClientId: payload.ClientId, OwnerPublicKey: payload.PublicKey})
 	if !accepted {
 		logger.Error(fmt.Sprintf("Join room declined, roomId: %s", roomId))
 		return &ErrJoinRoomDenied{RoomId: roomId}

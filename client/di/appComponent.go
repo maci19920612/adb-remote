@@ -98,7 +98,7 @@ func registerCommands(container *container.Container) {
 		config *config.ClientConfiguration,
 	) []*command.Command[command.BaseCommand] {
 		return []*command.Command[command.BaseCommand]{
-			command.CreateShareCommand(logger, client, smartSocket, config),
+			command.CreateShareCommand(logger, client, smartSocket, clientIdentity, config),
 			command.CreateConnectCommand(logger, client, smartSocket, clientIdentity, config),
 		}
 	})

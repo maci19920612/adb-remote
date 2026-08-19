@@ -194,12 +194,18 @@ func (c *Client) SendJoinRoom(roomId string, publicKey []byte) error {
 	})
 }
 
-func (c *Client) SendJoinRoomResponse(isAccepted int) error {
+// SendJoinRoomResponse sends the room owner's accept/decline decision,
+// presenting ownerPublicKey as this client's identity (see client/identity)
+// so the guest can display a fingerprint of it, symmetric with the owner
+// verifying the guest's. The transporter fills in the owner's client id
+// before forwarding to the guest.
+func (c *Client) SendJoinRoomResponse(isAccepted int, ownerPublicKey []byte) error {
 	c.Logger.Info(fmt.Sprintf("SendJoinRoomResponse(%d) called", isAccepted))
 	return c.withMessage(func(m *protocol.TransporterMessage) error {
 		m.SetResponseCommand(protocol.CommandJoinRoom)
 		if err := m.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{
-			Accepted: isAccepted,
+			Accepted:  isAccepted,
+			PublicKey: ownerPublicKey,
 		}); err != nil {
 			return err
 		}

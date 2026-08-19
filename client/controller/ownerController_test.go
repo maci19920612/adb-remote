@@ -48,6 +48,12 @@ func sendJoinRoomRequestWithKey(t *testing.T, server net.Conn, roomId string, gu
 
 func expectJoinResponse(t *testing.T, server net.Conn) int {
 	t.Helper()
+	accepted, _, _ := expectJoinResponseWithKey(t, server)
+	return accepted
+}
+
+func expectJoinResponseWithKey(t *testing.T, server net.Conn) (accepted int, ownerClientId string, ownerPublicKey []byte) {
+	t.Helper()
 	response := readMessage(t, server)
 	if response.Command() != protocol.CommandJoinRoom|protocol.CommandResponseMask {
 		t.Fatalf("expected a join room response, got %x", response.Command())
@@ -56,7 +62,7 @@ func expectJoinResponse(t *testing.T, server net.Conn) int {
 	if err != nil {
 		t.Fatalf("GetPayloadConnectRoomResponse failed: %s", err)
 	}
-	return payload.Accepted
+	return payload.Accepted, payload.ClientId, payload.PublicKey
 }
 
 func sendAdbTransport(t *testing.T, server net.Conn, adbMessage *adb.AdbMessage) {
@@ -115,11 +121,12 @@ func TestCreateRoomSuccess(t *testing.T) {
 
 func TestHandleJoinRequestAccepted(t *testing.T) {
 	client, server := newConnectedClient(t)
+	ownerIdentity := testIdentity(t)
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleJoinRequest(client, func(clientId string, publicKey []byte) (bool, error) {
+		handleJoinRequest(client, ownerIdentity, func(clientId string, publicKey []byte) (bool, error) {
 			if clientId != "GUEST1" {
 				t.Errorf("expected guest client id %q, got %q", "GUEST1", clientId)
 			}
@@ -127,19 +134,24 @@ func TestHandleJoinRequestAccepted(t *testing.T) {
 		}, nil, "GUEST1", nil)
 	}()
 
-	if accepted := expectJoinResponse(t, server); accepted != 1 {
+	accepted, _, ownerPublicKey := expectJoinResponseWithKey(t, server)
+	if accepted != 1 {
 		t.Fatalf("expected Accepted=1, got %d", accepted)
+	}
+	if !bytes.Equal(ownerPublicKey, ownerIdentity.PublicKey) {
+		t.Fatalf("expected the response to carry the owner's public key %x, got %x", []byte(ownerIdentity.PublicKey), ownerPublicKey)
 	}
 	<-done
 }
 
 func TestHandleJoinRequestDeclined(t *testing.T) {
 	client, server := newConnectedClient(t)
+	ownerIdentity := testIdentity(t)
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleJoinRequest(client, func(clientId string, publicKey []byte) (bool, error) { return false, nil }, nil, "GUEST1", nil)
+		handleJoinRequest(client, ownerIdentity, func(clientId string, publicKey []byte) (bool, error) { return false, nil }, nil, "GUEST1", nil)
 	}()
 
 	if accepted := expectJoinResponse(t, server); accepted != 0 {
@@ -201,11 +213,12 @@ func TestJoinAsRoomOwnerRelaysAdbTraffic(t *testing.T) {
 
 	events := make(chan OwnerEvent, 10)
 	onEvent := func(e OwnerEvent) { events <- e }
+	ownerIdentity := testIdentity(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- JoinAsRoomOwner(ctx, client, smartSocket, "emulator-5554", func(clientId string, publicKey []byte) (bool, error) {
+		done <- JoinAsRoomOwner(ctx, client, smartSocket, "emulator-5554", ownerIdentity, func(clientId string, publicKey []byte) (bool, error) {
 			return true, nil
 		}, onEvent)
 	}()
@@ -221,8 +234,12 @@ func TestJoinAsRoomOwnerRelaysAdbTraffic(t *testing.T) {
 
 	guestPublicKey := []byte{0xaa, 0xbb, 0xcc}
 	sendJoinRoomRequestWithKey(t, server, "ROOM7", "GUEST1", guestPublicKey)
-	if accepted := expectJoinResponse(t, server); accepted != 1 {
+	accepted, _, responsePublicKey := expectJoinResponseWithKey(t, server)
+	if accepted != 1 {
 		t.Fatalf("expected the join request to be accepted, got Accepted=%d", accepted)
+	}
+	if !bytes.Equal(responsePublicKey, ownerIdentity.PublicKey) {
+		t.Fatalf("expected the join response to carry the owner's public key %x, got %x", []byte(ownerIdentity.PublicKey), responsePublicKey)
 	}
 
 	joinRequested := expectOwnerEvent(t, events)
@@ -235,6 +252,9 @@ func TestJoinAsRoomOwnerRelaysAdbTraffic(t *testing.T) {
 	joinDecided := expectOwnerEvent(t, events)
 	if joinDecided.Kind != OwnerJoinDecided || joinDecided.GuestClientId != "GUEST1" || !joinDecided.Accepted {
 		t.Fatalf("expected GUEST1 to be reported as accepted, got %+v", joinDecided)
+	}
+	if !bytes.Equal(joinDecided.GuestPublicKey, guestPublicKey) {
+		t.Fatalf("expected the join decided event to carry the guest's public key %x, got %x", guestPublicKey, joinDecided.GuestPublicKey)
 	}
 
 	// Guest opens a stream.
@@ -353,11 +373,12 @@ func TestJoinRequestDoesNotBlockActiveStreamTraffic(t *testing.T) {
 		return true, nil
 	}
 
+	ownerIdentity := testIdentity(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- JoinAsRoomOwner(ctx, client, smartSocket, "emulator-5554", promptAccept, nil)
+		done <- JoinAsRoomOwner(ctx, client, smartSocket, "emulator-5554", ownerIdentity, promptAccept, nil)
 	}()
 
 	respondToCreateRoom(t, server, "ROOM7")

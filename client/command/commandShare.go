@@ -3,6 +3,7 @@ package command
 import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/config"
+	"adb-remote.maci.team/client/identity"
 	"adb-remote.maci.team/client/transportLayer"
 	"adb-remote.maci.team/client/tui"
 	"context"
@@ -14,6 +15,7 @@ func CreateShareCommand(
 	logger *slog.Logger,
 	client *transportLayer.Client,
 	smartSocket adb.IAdbSmartSocket,
+	ownerIdentity *identity.Identity,
 	config *config.ClientConfiguration,
 ) *Command[BaseCommand] {
 	return &Command[BaseCommand]{
@@ -23,7 +25,7 @@ func CreateShareCommand(
 			if !ok {
 				return InvalidCommandArgumentType
 			}
-			return tui.RunShare(context.Background(), client, smartSocket, *typedArgs.TargetDevice, *typedArgs.AutoAccept)
+			return tui.RunShare(context.Background(), client, smartSocket, ownerIdentity, *typedArgs.TargetDevice, *typedArgs.AutoAccept)
 		},
 		ParameterFactory: func() (BaseCommand, error) {
 			flagSet := flag.NewFlagSet("share", flag.ExitOnError)

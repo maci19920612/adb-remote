@@ -2,6 +2,7 @@ package controller
 
 import (
 	"adb-remote.maci.team/client/adb"
+	"adb-remote.maci.team/client/identity"
 	"adb-remote.maci.team/client/relay"
 	"adb-remote.maci.team/client/transportLayer"
 	"adb-remote.maci.team/shared/protocol"
@@ -23,7 +24,7 @@ type AcceptPromptFunc func(guestClientId string, guestPublicKey []byte) (accepte
 // changes are reported through onEvent; all presentation is the caller's
 // responsibility. Returns when ctx is cancelled or the transporter
 // connection is lost.
-func JoinAsRoomOwner(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, deviceId string, promptAccept AcceptPromptFunc, onEvent OwnerEventFunc) error {
+func JoinAsRoomOwner(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, deviceId string, ownerIdentity *identity.Identity, promptAccept AcceptPromptFunc, onEvent OwnerEventFunc) error {
 	logger := client.Logger
 
 	roomId, err := createRoom(client)
@@ -43,14 +44,14 @@ func JoinAsRoomOwner(ctx context.Context, client *transportLayer.Client, smartSo
 			if !ok {
 				return relay.ErrTransportClosed
 			}
-			dispatchOwnerMessage(client, multiplexer, promptAccept, onEvent, container)
+			dispatchOwnerMessage(client, multiplexer, ownerIdentity, promptAccept, onEvent, container)
 		}
 	}
 }
 
 // dispatchOwnerMessage routes a single incoming message either to the ADB
 // stream multiplexer or to the room join-request flow.
-func dispatchOwnerMessage(client *transportLayer.Client, multiplexer *relay.OwnerMultiplexer, promptAccept AcceptPromptFunc, onEvent OwnerEventFunc, container *transportLayer.MessageContainer) {
+func dispatchOwnerMessage(client *transportLayer.Client, multiplexer *relay.OwnerMultiplexer, ownerIdentity *identity.Identity, promptAccept AcceptPromptFunc, onEvent OwnerEventFunc, container *transportLayer.MessageContainer) {
 	logger := client.Logger
 
 	message, err := container.Data()
@@ -77,14 +78,14 @@ func dispatchOwnerMessage(client *transportLayer.Client, multiplexer *relay.Owne
 		// promptAccept commonly blocks on user input; run it off the
 		// dispatch loop so an already-connected guest's ADB traffic keeps
 		// flowing while the operator decides.
-		go handleJoinRequest(client, promptAccept, onEvent, payload.ClientId, payload.PublicKey)
+		go handleJoinRequest(client, ownerIdentity, promptAccept, onEvent, payload.ClientId, payload.PublicKey)
 	default:
 		defer container.Dispose()
 		logger.Info(fmt.Sprintf("Ignoring unexpected message, command: %x", message.Command()))
 	}
 }
 
-func handleJoinRequest(client *transportLayer.Client, promptAccept AcceptPromptFunc, onEvent OwnerEventFunc, guestClientId string, guestPublicKey []byte) {
+func handleJoinRequest(client *transportLayer.Client, ownerIdentity *identity.Identity, promptAccept AcceptPromptFunc, onEvent OwnerEventFunc, guestClientId string, guestPublicKey []byte) {
 	logger := client.Logger
 
 	accepted, err := promptAccept(guestClientId, guestPublicKey)
@@ -101,12 +102,12 @@ func handleJoinRequest(client *transportLayer.Client, promptAccept AcceptPromptF
 	if accepted {
 		isAccepted = 1
 	}
-	if err := client.SendJoinRoomResponse(isAccepted); err != nil {
+	if err := client.SendJoinRoomResponse(isAccepted, ownerIdentity.PublicKey); err != nil {
 		logger.Error(fmt.Sprintf("Failed to send the join room response for %s: %s", guestClientId, err))
 		emitOwner(onEvent, OwnerEvent{Kind: OwnerJoinFailed, GuestClientId: guestClientId, Err: err})
 		return
 	}
-	emitOwner(onEvent, OwnerEvent{Kind: OwnerJoinDecided, GuestClientId: guestClientId, Accepted: accepted})
+	emitOwner(onEvent, OwnerEvent{Kind: OwnerJoinDecided, GuestClientId: guestClientId, GuestPublicKey: guestPublicKey, Accepted: accepted})
 }
 
 func createRoom(client *transportLayer.Client) (string, error) {

@@ -44,7 +44,9 @@ type GuestEventKind int
 
 const (
 	// GuestJoinDecided reports whether the room owner accepted the join
-	// request.
+	// request. When Accepted, OwnerClientId and OwnerPublicKey identify the
+	// owner (see client/identity) so the guest can display a fingerprint of
+	// it.
 	GuestJoinDecided GuestEventKind = iota
 	// GuestProxyReady reports that the local AdbProxy is listening, with
 	// the port a real "adb connect" should target.
@@ -68,10 +70,12 @@ const (
 // GuestEvent is emitted by JoinAsGuest to report state changes as they
 // happen; the caller (e.g. a TUI) owns all presentation.
 type GuestEvent struct {
-	Kind      GuestEventKind
-	Accepted  bool
-	LocalPort string
-	Err       error
+	Kind           GuestEventKind
+	Accepted       bool
+	OwnerClientId  string
+	OwnerPublicKey []byte
+	LocalPort      string
+	Err            error
 }
 
 // GuestEventFunc receives GuestEvents. It must not block for long, for the

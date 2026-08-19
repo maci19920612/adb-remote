@@ -37,6 +37,11 @@ type connectModel struct {
 	clientId string
 	err      error
 
+	// ownerClientId/ownerFingerprint identify the room owner once the join
+	// request is accepted, since a room holds exactly one owner.
+	ownerClientId    string
+	ownerFingerprint string
+
 	adbConnected  bool
 	adbConnectErr error
 
@@ -132,6 +137,8 @@ func (m *connectModel) handleGuestEvent(e controller.GuestEvent) {
 	case controller.GuestJoinDecided:
 		if e.Accepted {
 			m.stage = connectStageProxyStarting
+			m.ownerClientId = e.OwnerClientId
+			m.ownerFingerprint = identity.Fingerprint(e.OwnerPublicKey)
 		} else {
 			m.stage = connectStageDenied
 		}
@@ -163,6 +170,10 @@ func (m *connectModel) View() string {
 	b.WriteString(labelStyle.Render("Your fingerprint: ") + m.fingerprint + "\n")
 	b.WriteString(dimStyle.Render("  Share this with the room owner so they can verify it's really you accepting.") + "\n")
 	b.WriteString(labelStyle.Render("Room id:        ") + m.roomId + "\n\n")
+	if m.ownerClientId != "" {
+		b.WriteString(labelStyle.Render("Room owner: ") + successStyle.Render(m.ownerClientId) + "\n")
+		b.WriteString(labelStyle.Render("  Owner fingerprint: ") + m.ownerFingerprint + "\n\n")
+	}
 	b.WriteString(labelStyle.Render("Connection state: ") + m.stateLine() + "\n\n")
 
 	switch m.stage {

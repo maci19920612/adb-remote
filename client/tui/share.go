@@ -30,6 +30,7 @@ type shareModel struct {
 	ctx         context.Context
 	smartSocket adb.IAdbSmartSocket
 	autoAccept  bool
+	fingerprint string
 
 	// selectedDevice carries the chosen device id from Update (once) to
 	// the background owner-flow goroutine.
@@ -47,14 +48,22 @@ type shareModel struct {
 	pendingFingerprint string
 	pendingRespond     chan<- bool
 
+	// connectedGuestId/connectedGuestFingerprint identify the room's
+	// current guest, since a room holds exactly one guest at a time; they
+	// stick around (rather than fading into the activity log) for as long
+	// as that guest is connected.
+	connectedGuestId          string
+	connectedGuestFingerprint string
+
 	activity []string
 }
 
-func newShareModel(ctx context.Context, smartSocket adb.IAdbSmartSocket, presetDevice string, autoAccept bool) *shareModel {
+func newShareModel(ctx context.Context, smartSocket adb.IAdbSmartSocket, presetDevice string, autoAccept bool, fingerprint string) *shareModel {
 	m := &shareModel{
 		ctx:            ctx,
 		smartSocket:    smartSocket,
 		autoAccept:     autoAccept,
+		fingerprint:    fingerprint,
 		selectedDevice: make(chan string, 1),
 		stage:          shareStageLoadingDevices,
 	}
@@ -68,14 +77,14 @@ func newShareModel(ctx context.Context, smartSocket adb.IAdbSmartSocket, presetD
 // RunShare runs the interactive share TUI to completion. If presetDevice is
 // non-empty, the device picker is skipped. If autoAccept is true, join
 // requests are accepted automatically instead of prompting.
-func RunShare(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, presetDevice string, autoAccept bool) error {
+func RunShare(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, ownerIdentity *identity.Identity, presetDevice string, autoAccept bool) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	m := newShareModel(ctx, smartSocket, presetDevice, autoAccept)
+	m := newShareModel(ctx, smartSocket, presetDevice, autoAccept, ownerIdentity.Fingerprint())
 	program := tea.NewProgram(m)
 
-	go runOwnerFlow(ctx, program, m, client, smartSocket, autoAccept)
+	go runOwnerFlow(ctx, program, m, client, smartSocket, ownerIdentity, autoAccept)
 
 	_, err := program.Run()
 	cancel()
@@ -88,7 +97,7 @@ func RunShare(ctx context.Context, client *transportLayer.Client, smartSocket ad
 // runOwnerFlow waits for a device to be selected, then performs the
 // handshake and services the room, forwarding every state change into the
 // TUI as a message.
-func runOwnerFlow(ctx context.Context, program *tea.Program, m *shareModel, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, autoAccept bool) {
+func runOwnerFlow(ctx context.Context, program *tea.Program, m *shareModel, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, ownerIdentity *identity.Identity, autoAccept bool) {
 	var deviceId string
 	select {
 	case deviceId = <-m.selectedDevice:
@@ -120,7 +129,7 @@ func runOwnerFlow(ctx context.Context, program *tea.Program, m *shareModel, clie
 		program.Send(ownerEventMsg(e))
 	}
 
-	if err := controller.JoinAsRoomOwner(ctx, client, smartSocket, deviceId, promptAccept, onEvent); err != nil && ctx.Err() == nil {
+	if err := controller.JoinAsRoomOwner(ctx, client, smartSocket, deviceId, ownerIdentity, promptAccept, onEvent); err != nil && ctx.Err() == nil {
 		program.Send(shareErrorMsg{err})
 	}
 }
@@ -253,6 +262,8 @@ func (m *shareModel) handleOwnerEvent(e controller.OwnerEvent) {
 		verb := "declined"
 		if e.Accepted {
 			verb = "accepted"
+			m.connectedGuestId = e.GuestClientId
+			m.connectedGuestFingerprint = identity.Fingerprint(e.GuestPublicKey)
 		}
 		m.appendActivity(fmt.Sprintf("clientId %s: %s", e.GuestClientId, verb))
 	case controller.OwnerJoinFailed:
@@ -296,11 +307,15 @@ func (m *shareModel) View() string {
 		if m.clientId != "" {
 			b.WriteString(labelStyle.Render("Your client id: ") + m.clientId + "\n")
 		}
+		b.WriteString(labelStyle.Render("Your fingerprint: ") + m.fingerprint + "\n")
 		b.WriteString(labelStyle.Render("Room id:        ") + successStyle.Render(m.roomId) + "\n\n")
 		if m.pendingRespond != nil {
 			b.WriteString(promptStyle.Render(fmt.Sprintf("Join request from clientId: %s — accept? [y/n]", m.pendingGuestId)) + "\n")
 			b.WriteString(labelStyle.Render("  Guest fingerprint: ") + m.pendingFingerprint + "\n")
 			b.WriteString(dimStyle.Render("  Verify this matches the guest's own displayed fingerprint out of band before accepting.") + "\n\n")
+		} else if m.connectedGuestId != "" {
+			b.WriteString(labelStyle.Render("Connected guest: ") + successStyle.Render(m.connectedGuestId) + "\n")
+			b.WriteString(labelStyle.Render("  Guest fingerprint: ") + m.connectedGuestFingerprint + "\n\n")
 		} else {
 			b.WriteString(dimStyle.Render("Waiting for guests to join...") + "\n\n")
 		}
