@@ -2,6 +2,7 @@ package controller
 
 import (
 	"adb-remote.maci.team/client/adb"
+	"adb-remote.maci.team/client/identity"
 	"adb-remote.maci.team/client/relay"
 	"adb-remote.maci.team/client/transportLayer"
 	"adb-remote.maci.team/shared/protocol"
@@ -28,8 +29,8 @@ func (e *ErrJoinRoomDenied) Error() string {
 // stale entry doesn't linger in `adb devices` after this process exits.
 // State changes are reported through onEvent; all presentation is the
 // caller's responsibility.
-func JoinAsGuest(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, roomId string, localPort string, onEvent GuestEventFunc) error {
-	if err := roomJoinStep(client, roomId, onEvent); err != nil {
+func JoinAsGuest(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, guestIdentity *identity.Identity, roomId string, localPort string, onEvent GuestEventFunc) error {
+	if err := roomJoinStep(client, guestIdentity, roomId, onEvent); err != nil {
 		return err
 	}
 
@@ -72,10 +73,10 @@ func JoinAsGuest(ctx context.Context, client *transportLayer.Client, smartSocket
 	}
 }
 
-func roomJoinStep(client *transportLayer.Client, roomId string, onEvent GuestEventFunc) error {
+func roomJoinStep(client *transportLayer.Client, guestIdentity *identity.Identity, roomId string, onEvent GuestEventFunc) error {
 	logger := client.Logger
 	logger.Info(fmt.Sprintf("Joining room %s", roomId))
-	if err := client.SendJoinRoom(roomId); err != nil {
+	if err := client.SendJoinRoom(roomId, guestIdentity.PublicKey); err != nil {
 		logger.Error(fmt.Sprintf("Failed to join room: %s, error: %s", roomId, err))
 		return err
 	}

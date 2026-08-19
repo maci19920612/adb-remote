@@ -177,12 +177,16 @@ func (c *Client) SendCreateRoom() error {
 	})
 }
 
-func (c *Client) SendJoinRoom(roomId string) error {
+// SendJoinRoom requests to join roomId, presenting publicKey as this
+// client's identity (see client/identity) so the room owner can verify a
+// fingerprint of it out of band before accepting.
+func (c *Client) SendJoinRoom(roomId string, publicKey []byte) error {
 	c.Logger.Info(fmt.Sprintf("SendJoinRoom(%s) called", roomId))
 	return c.withMessage(func(m *protocol.TransporterMessage) error {
 		m.SetDirectCommand(protocol.CommandJoinRoom)
 		if err := m.SetPayloadConnectRoom(&protocol.TransporterMessagePayloadConnectRoom{
-			RoomId: roomId,
+			RoomId:    roomId,
+			PublicKey: publicKey,
 		}); err != nil {
 			return err
 		}

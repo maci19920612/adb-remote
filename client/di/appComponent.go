@@ -4,6 +4,7 @@ import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/command"
 	"adb-remote.maci.team/client/config"
+	"adb-remote.maci.team/client/identity"
 	"adb-remote.maci.team/client/transportLayer"
 	"adb-remote.maci.team/shared/prettyLogHandler"
 	"github.com/golobby/container/v3"
@@ -19,6 +20,7 @@ func CreateContainer() *container.Container {
 	registerConfig(&cont)
 	registerClient(&cont)
 	registerSmartSocket(&cont)
+	registerIdentity(&cont)
 	registerCommands(&cont)
 	return &cont
 }
@@ -72,16 +74,32 @@ func registerSmartSocket(container *container.Container) {
 	}
 }
 
+// registerIdentity loads (generating on first run) this installation's
+// persistent identity keypair — see client/identity.
+func registerIdentity(container *container.Container) {
+	err := container.Singleton(func() (*identity.Identity, error) {
+		path, err := identity.DefaultPath()
+		if err != nil {
+			return nil, err
+		}
+		return identity.Load(path)
+	})
+	if err != nil {
+		panic(err)
+	}
+}
+
 func registerCommands(container *container.Container) {
 	err := container.Singleton(func(
 		logger *slog.Logger,
 		client *transportLayer.Client,
 		smartSocket adb.IAdbSmartSocket,
+		clientIdentity *identity.Identity,
 		config *config.ClientConfiguration,
 	) []*command.Command[command.BaseCommand] {
 		return []*command.Command[command.BaseCommand]{
 			command.CreateShareCommand(logger, client, smartSocket, config),
-			command.CreateConnectCommand(logger, client, smartSocket, config),
+			command.CreateConnectCommand(logger, client, smartSocket, clientIdentity, config),
 		}
 	})
 	if err != nil {

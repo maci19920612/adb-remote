@@ -3,6 +3,7 @@ package command
 import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/config"
+	"adb-remote.maci.team/client/identity"
 	"adb-remote.maci.team/client/transportLayer"
 	"adb-remote.maci.team/client/tui"
 	"context"
@@ -14,6 +15,7 @@ func CreateConnectCommand(
 	logger *slog.Logger,
 	client *transportLayer.Client,
 	smartSocket adb.IAdbSmartSocket,
+	guestIdentity *identity.Identity,
 	config *config.ClientConfiguration,
 ) *Command[BaseCommand] {
 	return &Command[BaseCommand]{
@@ -23,7 +25,7 @@ func CreateConnectCommand(
 			if !ok {
 				return InvalidCommandArgumentType
 			}
-			return tui.RunConnect(context.Background(), client, smartSocket, *typedArgs.TargetRoomId, *typedArgs.LocalPort)
+			return tui.RunConnect(context.Background(), client, smartSocket, guestIdentity, *typedArgs.TargetRoomId, *typedArgs.LocalPort)
 		},
 		ParameterFactory: func() (BaseCommand, error) {
 			flagSet := flag.NewFlagSet("connect", flag.ExitOnError)

@@ -5,6 +5,7 @@ import (
 	"adb-remote.maci.team/client/config"
 	"adb-remote.maci.team/client/internal/testtls"
 	"adb-remote.maci.team/shared/protocol"
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
@@ -83,7 +84,8 @@ func TestSendConnectWritesExpectedMessage(t *testing.T) {
 func TestSendJoinRoomWritesExpectedMessage(t *testing.T) {
 	client, server := newConnectedTestClient(t)
 
-	if err := client.SendJoinRoom("ROOM7"); err != nil {
+	publicKey := []byte{0x01, 0x02, 0x03}
+	if err := client.SendJoinRoom("ROOM7", publicKey); err != nil {
 		t.Fatalf("SendJoinRoom failed: %s", err)
 	}
 
@@ -100,6 +102,9 @@ func TestSendJoinRoomWritesExpectedMessage(t *testing.T) {
 	}
 	if payload.RoomId != "ROOM7" {
 		t.Fatalf("expected room id %q, got %q", "ROOM7", payload.RoomId)
+	}
+	if !bytes.Equal(payload.PublicKey, publicKey) {
+		t.Fatalf("expected public key %x, got %x", publicKey, payload.PublicKey)
 	}
 }
 

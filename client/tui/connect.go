@@ -3,6 +3,7 @@ package tui
 import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/controller"
+	"adb-remote.maci.team/client/identity"
 	"adb-remote.maci.team/client/transportLayer"
 	"context"
 	"errors"
@@ -28,8 +29,9 @@ const (
 // client id and the connection state as the guest joins the room, starts
 // the local proxy, and relays traffic.
 type connectModel struct {
-	roomId    string
-	localPort string
+	roomId      string
+	localPort   string
+	fingerprint string
 
 	stage    connectStage
 	clientId string
@@ -46,17 +48,17 @@ type connectModel struct {
 // return until the background guest flow (including its "adb disconnect"
 // cleanup) has fully stopped, so callers can rely on cleanup having
 // happened by the time this returns.
-func RunConnect(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, roomId string, localPort string) error {
+func RunConnect(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, guestIdentity *identity.Identity, roomId string, localPort string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	m := &connectModel{roomId: roomId, localPort: localPort, stage: connectStageConnecting}
+	m := &connectModel{roomId: roomId, localPort: localPort, fingerprint: guestIdentity.Fingerprint(), stage: connectStageConnecting}
 	program := tea.NewProgram(m)
 
 	guestFlowDone := make(chan struct{})
 	go func() {
 		defer close(guestFlowDone)
-		runGuestFlow(ctx, program, client, smartSocket, roomId, localPort)
+		runGuestFlow(ctx, program, client, smartSocket, guestIdentity, roomId, localPort)
 	}()
 
 	_, err := program.Run()
@@ -69,7 +71,7 @@ func RunConnect(ctx context.Context, client *transportLayer.Client, smartSocket 
 	return m.err
 }
 
-func runGuestFlow(ctx context.Context, program *tea.Program, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, roomId string, localPort string) {
+func runGuestFlow(ctx context.Context, program *tea.Program, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, guestIdentity *identity.Identity, roomId string, localPort string) {
 	clientId, err := controller.Handshake(client)
 	if err != nil {
 		program.Send(connectErrorMsg{err})
@@ -82,7 +84,7 @@ func runGuestFlow(ctx context.Context, program *tea.Program, client *transportLa
 		program.Send(guestEventMsg(e))
 	}
 
-	err = controller.JoinAsGuest(ctx, client, smartSocket, roomId, localPort, onEvent)
+	err = controller.JoinAsGuest(ctx, client, smartSocket, guestIdentity, roomId, localPort, onEvent)
 	if err == nil || ctx.Err() != nil {
 		return
 	}
@@ -158,6 +160,8 @@ func (m *connectModel) View() string {
 	if m.clientId != "" {
 		b.WriteString(labelStyle.Render("Your client id: ") + m.clientId + "\n")
 	}
+	b.WriteString(labelStyle.Render("Your fingerprint: ") + m.fingerprint + "\n")
+	b.WriteString(dimStyle.Render("  Share this with the room owner so they can verify it's really you accepting.") + "\n")
 	b.WriteString(labelStyle.Render("Room id:        ") + m.roomId + "\n\n")
 	b.WriteString(labelStyle.Render("Connection state: ") + m.stateLine() + "\n\n")
 

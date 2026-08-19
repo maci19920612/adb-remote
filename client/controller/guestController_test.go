@@ -2,15 +2,27 @@ package controller
 
 import (
 	"adb-remote.maci.team/client/adb"
+	"adb-remote.maci.team/client/identity"
 	"adb-remote.maci.team/shared/protocol"
+	"bytes"
 	"context"
 	"errors"
 	"net"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func testIdentity(t *testing.T) *identity.Identity {
+	t.Helper()
+	guestIdentity, err := identity.Load(filepath.Join(t.TempDir(), "identity"))
+	if err != nil {
+		t.Fatalf("failed to create a test identity: %s", err)
+	}
+	return guestIdentity
+}
 
 func respondToJoinRoom(t *testing.T, server net.Conn, accepted int) {
 	t.Helper()
@@ -31,9 +43,10 @@ func respondToJoinRoom(t *testing.T, server net.Conn, accepted int) {
 
 func TestRoomJoinStepAccepted(t *testing.T) {
 	client, server := newConnectedClient(t)
+	guestIdentity := testIdentity(t)
 
 	done := make(chan error, 1)
-	go func() { done <- roomJoinStep(client, "ROOM1", nil) }()
+	go func() { done <- roomJoinStep(client, guestIdentity, "ROOM1", nil) }()
 
 	respondToJoinRoom(t, server, 1)
 
@@ -44,9 +57,10 @@ func TestRoomJoinStepAccepted(t *testing.T) {
 
 func TestRoomJoinStepDenied(t *testing.T) {
 	client, server := newConnectedClient(t)
+	guestIdentity := testIdentity(t)
 
 	done := make(chan error, 1)
-	go func() { done <- roomJoinStep(client, "ROOM1", nil) }()
+	go func() { done <- roomJoinStep(client, guestIdentity, "ROOM1", nil) }()
 
 	respondToJoinRoom(t, server, 0)
 
@@ -60,6 +74,41 @@ func TestRoomJoinStepDenied(t *testing.T) {
 	}
 }
 
+// TestRoomJoinStepSendsPublicKey verifies the guest's identity public key
+// actually goes out on the wire with the join request, since that's what
+// lets the room owner display and verify its fingerprint before accepting.
+func TestRoomJoinStepSendsPublicKey(t *testing.T) {
+	client, server := newConnectedClient(t)
+	guestIdentity := testIdentity(t)
+
+	done := make(chan error, 1)
+	go func() { done <- roomJoinStep(client, guestIdentity, "ROOM1", nil) }()
+
+	request := readMessage(t, server)
+	if request.Command() != protocol.CommandJoinRoom {
+		t.Fatalf("expected a join room request, got %x", request.Command())
+	}
+	payload, err := request.GetPayloadConnectRoom()
+	if err != nil {
+		t.Fatalf("GetPayloadConnectRoom failed: %s", err)
+	}
+	if !bytes.Equal(payload.PublicKey, guestIdentity.PublicKey) {
+		t.Fatalf("expected the join request to carry the guest's public key %x, got %x", []byte(guestIdentity.PublicKey), payload.PublicKey)
+	}
+
+	response := protocol.CreateTransporterMessage()
+	response.SetResponseCommand(protocol.CommandJoinRoom)
+	if err := response.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{Accepted: 1}); err != nil {
+		t.Fatalf("SetPayloadConnectRoomResult failed: %s", err)
+	}
+	if err := response.Write(server); err != nil {
+		t.Fatalf("failed to write the response: %s", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("roomJoinStep failed: %s", err)
+	}
+}
+
 // TestRoomJoinStepReportsTransporterError is a regression test: a real live
 // run surfaced that a transporter-side error response (e.g. "room not
 // found", sent with CommandErrorResponseMask rather than
@@ -69,9 +118,10 @@ func TestRoomJoinStepDenied(t *testing.T) {
 // message.IsError() first.
 func TestRoomJoinStepReportsTransporterError(t *testing.T) {
 	client, server := newConnectedClient(t)
+	guestIdentity := testIdentity(t)
 
 	done := make(chan error, 1)
-	go func() { done <- roomJoinStep(client, "ROOM1", nil) }()
+	go func() { done <- roomJoinStep(client, guestIdentity, "ROOM1", nil) }()
 
 	request := readMessage(t, server)
 	if request.Command() != protocol.CommandJoinRoom {
@@ -153,6 +203,7 @@ func TestJoinAsGuestRelaysAdbTraffic(t *testing.T) {
 	client, server := newConnectedClient(t)
 	port := freeLocalPort(t)
 	smartSocket := &fakeGuestSmartSocket{}
+	guestIdentity := testIdentity(t)
 
 	var events []GuestEvent
 	var eventsMu sync.Mutex
@@ -164,7 +215,7 @@ func TestJoinAsGuestRelaysAdbTraffic(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- JoinAsGuest(ctx, client, smartSocket, "ROOM1", port, onEvent) }()
+	go func() { done <- JoinAsGuest(ctx, client, smartSocket, guestIdentity, "ROOM1", port, onEvent) }()
 
 	respondToJoinRoom(t, server, 1)
 
@@ -296,6 +347,7 @@ func TestJoinAsGuestReportsAutomaticAdbConnectFailure(t *testing.T) {
 	port := freeLocalPort(t)
 	connectErr := errors.New("adb-server unreachable")
 	smartSocket := &fakeGuestSmartSocket{connectErr: connectErr}
+	guestIdentity := testIdentity(t)
 
 	events := make(chan GuestEvent, 10)
 	onEvent := func(e GuestEvent) { events <- e }
@@ -303,7 +355,7 @@ func TestJoinAsGuestReportsAutomaticAdbConnectFailure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- JoinAsGuest(ctx, client, smartSocket, "ROOM1", port, onEvent) }()
+	go func() { done <- JoinAsGuest(ctx, client, smartSocket, guestIdentity, "ROOM1", port, onEvent) }()
 
 	respondToJoinRoom(t, server, 1)
 
