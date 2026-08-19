@@ -124,37 +124,50 @@ cd transporter && go test ./... -race
 
 ## Status
 
+Both roles are verified end-to-end against a real `adb` client
+(platform-tools 35.0.0) and a real Android emulator: create a room, join
+it, `adb connect`, `adb devices` shows the shared device as `device`
+(online), and real traffic flows correctly in both directions — `adb
+shell` (including exit codes), `adb push`/`pull` of a 512KB file (exercises
+the `sync:` protocol and multi-chunk flow control), and several concurrent
+`adb shell` commands relayed as independent streams at once.
+
 - **Room lifecycle** (connect, create room, join room, accept/decline) and
   the **transporter's message relay**: verified with integration tests and
-  against a real `adb` client — see the `connectionManager`/`roomManager`
-  tests and `client/controller`'s tests.
-- **Guest role (`connect`)**: verified end-to-end against a real `adb`
-  client (platform-tools 35.0.0) and a real Android emulator. The local
-  `AdbProxy` handshake, the ADB wire format (including the real
-  additive-checksum quirk — see below), and the transporter relay all work;
-  `adb devices` shows the proxied device as `device` (online), not
-  `offline`.
-- **Owner role (`share`)**: **currently broken against a real adb-server.**
-  It uses `host:transport:<serial>` expecting a raw ADB wire-protocol
-  (CNXN/OPEN/WRTE/OKAY/CLSE) pass-through to the device. That pass-through
-  doesn't exist in adb-server's public API: once a connection is in
-  transport mode, adb-server expects a *second smartsocket-style service
-  request* (e.g. `shell,v2,raw:<cmd>`, `sync:`), not raw wire-protocol
-  packets — verified directly against `adb-server` with a raw socket,
-  independent of this codebase. Fixing this requires turning the owner side
-  into a per-stream multiplexer: for each `OPEN` from the guest, dial a new
-  `host:transport:<serial>` + service-string connection to the local
-  adb-server and pump bytes for that one stream, rather than relaying one
-  long-lived raw pipe. This is tracked as follow-up work, not yet
-  implemented.
+  live traffic — see the `connectionManager`/`roomManager` tests and
+  `client/controller`'s tests.
+- **Guest role (`connect`)**: a local `AdbProxy` (`client/adb/proxy.go`)
+  performs the CNXN handshake with the local `adb` server and hands the
+  connection to `client/relay.Run`, which pumps ADB messages 1:1 between it
+  and the transporter. This is the easy direction, since a raw ADB
+  wire-protocol connection is exactly what a real `adb connect`-ed device
+  looks like.
+- **Owner role (`share`)**: real `adb-server` does **not** expose a raw ADB
+  wire-protocol (CNXN/OPEN/WRTE/OKAY/CLSE) pass-through to a device over its
+  public API — `host:transport:<serial>` merely selects a device; the next
+  thing it expects is a *second smartsocket-style service request* (e.g.
+  `shell,v2,raw:<cmd>`, `sync:`), verified directly against `adb-server`
+  with a raw socket, independent of this codebase. So the owner side
+  (`client/relay.OwnerMultiplexer`, in `client/relay/owner.go`) is a
+  per-stream multiplexer: for every `OPEN` the guest sends, it dials a
+  fresh `host:transport:<serial>` + service-string connection to the local
+  adb-server and relays just that one stream as `WRTE`/`OKAY`/`CLSE`,
+  honoring basic ADB flow control (wait for an `OKAY` after each `WRTE`
+  before sending the next one for that stream). A join request's TTY prompt
+  runs off the main dispatch loop so it can't stall an already-connected
+  guest's traffic.
 
-### A note on the ADB wire "checksum"
+### Two ADB wire-format quirks that will break this against real `adb` if regressed
 
-Earlier versions of this codebase validated the ADB message header's
-`data_check` field as a real CRC32. Real `adb` builds don't: the field is
-the sum of the payload bytes truncated to 32 bits (not CRC32 despite the
-name), and every message after the initial `CNXN` carries a literal `0`
-there, which real adb-server/adbd doesn't validate either. This code now
-matches that behavior (see `client/adb/adbMessage.go` and its tests) —
-without it, no real `adb` client can complete the handshake with this
-proxy.
+- **The "checksum" isn't a CRC32.** The ADB message header's `data_check`
+  field is the sum of the payload bytes truncated to 32 bits, not a real
+  CRC32 despite the name — and every message after the initial `CNXN`
+  carries a literal `0` there, unvalidated by real adb-server/adbd. This
+  code doesn't validate it either (see `client/adb/adbMessage.go` and its
+  tests, including one built from a real captured `adb connect` packet).
+- **The CNXN device banner must advertise `features=shell_v2,...`.**
+  Without it, a real `adb` client silently negotiates the legacy v1
+  `shell:` service instead of `shell,v2,raw:`, which relays stdout/stderr
+  fine but has no way to carry the remote command's exit code back at all
+  (`adb shell "exit 7"` would report `0` instead of `7`, with no error).
+  See `deviceFeatures` in `client/adb/proxy.go`.
