@@ -131,6 +131,9 @@ func (m *TransporterMessage) GetPayloadConnectRoom() (*TransporterMessagePayload
 		return nil, err
 	}
 	_, clientId, err := m.readString(offset)
+	if err != nil {
+		return nil, err
+	}
 	return &TransporterMessagePayloadConnectRoom{
 		RoomId:   roomId,
 		ClientId: clientId,
@@ -143,6 +146,9 @@ func (m *TransporterMessage) SetPayloadConnectRoom(data *TransporterMessagePaylo
 		return err
 	}
 	payloadLength, err := m.writeString(offset, data.ClientId)
+	if err != nil {
+		return err
+	}
 	m.updatePayloadMetadata(payloadLength)
 	return nil
 }
@@ -175,6 +181,23 @@ func (m *TransporterMessage) SetPayloadConnectRoomResult(data *TransporterMessag
 
 //endregion
 
+// region Raw payload
+
+// SetRawPayload copies an already-encoded, opaque byte slice into the
+// message's payload buffer, bypassing the typed payload accessors. Used to
+// forward or embed data (e.g. an ADB protocol message) whose framing is
+// owned by another layer.
+func (m *TransporterMessage) SetRawPayload(data []byte) error {
+	if uint32(len(data)) > uint32(len(m.payloadBuffer)) {
+		return fmt.Errorf("not enough space in the payload buffer, size: %d, data length: %d", len(m.payloadBuffer), len(data))
+	}
+	copy(m.payloadBuffer, data)
+	m.updatePayloadMetadata(uint32(len(data)))
+	return nil
+}
+
+//endregion
+
 // region Util functions
 func (m *TransporterMessage) writeInt(offset uint32, value int) (uint32, error) {
 	typeSize := uint32(4)
@@ -182,44 +205,51 @@ func (m *TransporterMessage) writeInt(offset uint32, value int) (uint32, error) 
 	if uint32(len(m.payloadBuffer)) < newOffset {
 		return 0, fmt.Errorf("not enough space in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), newOffset)
 	}
-	ByteOrder.PutUint32(m.payloadBuffer[offset:typeSize], uint32(value))
+	ByteOrder.PutUint32(m.payloadBuffer[offset:newOffset], uint32(value))
 	return newOffset, nil
 }
 
 func (m *TransporterMessage) writeString(offset uint32, value string) (uint32, error) {
 	lengthTypeSize := uint32(4)
 	valueBytes := []byte(value)
-	newOffset := offset + lengthTypeSize + uint32(len(valueBytes))
+	dataOffset := offset + lengthTypeSize
+	newOffset := dataOffset + uint32(len(valueBytes))
 	if uint32(len(m.payloadBuffer)) < newOffset {
 		return 0, fmt.Errorf("not enough space in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), newOffset)
 	}
-	ByteOrder.PutUint32(m.payloadBuffer[offset:lengthTypeSize], uint32(len(valueBytes)))
-	copy(m.payloadBuffer[offset+lengthTypeSize:], valueBytes)
+	ByteOrder.PutUint32(m.payloadBuffer[offset:dataOffset], uint32(len(valueBytes)))
+	copy(m.payloadBuffer[dataOffset:newOffset], valueBytes)
 	return newOffset, nil
 }
 
+// readInt and readString bound-check against the message's declared
+// PayloadLength (the extent actually populated by the last Read/SetRawPayload
+// call), not the raw payload buffer capacity. The buffer is pooled and
+// reused across messages, so anything beyond PayloadLength may be stale data
+// left over from a previous message; treating it as readable would silently
+// leak that stale content instead of failing.
 func (m *TransporterMessage) readInt(offset uint32) (uint32, int, error) {
 	typeSize := uint32(4)
-	if uint32(len(m.payloadBuffer)) < typeSize+offset {
-		return 0, 0, fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), typeSize+offset)
+	newOffset := offset + typeSize
+	if m.PayloadLength() < newOffset {
+		return 0, 0, fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", m.PayloadLength(), newOffset)
 	}
-	value := ByteOrder.Uint32(m.payloadBuffer[offset:typeSize])
-	return offset + typeSize, int(value), nil
+	value := ByteOrder.Uint32(m.payloadBuffer[offset:newOffset])
+	return newOffset, int(value), nil
 }
 
 func (m *TransporterMessage) readString(offset uint32) (uint32, string, error) {
 	lengthTypeSize := uint32(4)
-	newOffset := offset + lengthTypeSize
-	if uint32(len(m.payloadBuffer)) < newOffset {
-		return 0, "", fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), newOffset)
+	dataOffset := offset + lengthTypeSize
+	if m.PayloadLength() < dataOffset {
+		return 0, "", fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", m.PayloadLength(), dataOffset)
 	}
-	length := ByteOrder.Uint32(m.payloadBuffer[offset:lengthTypeSize])
-	newOffset += length
-	if uint32(len(m.payloadBuffer)) < newOffset {
-		return 0, "", fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), newOffset)
+	length := ByteOrder.Uint32(m.payloadBuffer[offset:dataOffset])
+	newOffset := dataOffset + length
+	if m.PayloadLength() < newOffset {
+		return 0, "", fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", m.PayloadLength(), newOffset)
 	}
-	offset += lengthTypeSize
-	value := string(m.payloadBuffer[offset : offset+length])
+	value := string(m.payloadBuffer[dataOffset:newOffset])
 	return newOffset, value, nil
 }
 

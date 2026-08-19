@@ -1,6 +1,11 @@
 package protocol
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+var ErrPayloadTooLarge = errors.New("payload length exceeds the maximum allowed payload size")
 
 func EnsureLength(expected int, actual int) error {
 	if expected != actual {

@@ -5,7 +5,6 @@ import (
 	"sync"
 )
 
-const poolSizeInitial = 10
 const poolSizeMax = 100
 
 type ObjectPoolFactory[T any] func() *T
@@ -20,7 +19,7 @@ type ObjectPool[T any] struct {
 func NewObjectPool[T any](factory ObjectPoolFactory[T]) *ObjectPool[T] {
 	return &ObjectPool[T]{
 		mutex:     new(sync.Mutex),
-		container: make([]*DisposableObjectContainer[T], poolSizeInitial),
+		container: make([]*DisposableObjectContainer[T], poolSizeMax),
 		factory:   factory,
 		length:    0,
 	}
@@ -35,6 +34,7 @@ func (pool *ObjectPool[T]) Obtain() *DisposableObjectContainer[T] {
 		pool.length--
 		cachedObject := pool.container[pool.length]
 		pool.container[pool.length] = nil
+		cachedObject.reset()
 		return cachedObject
 	}
 }
@@ -69,6 +69,17 @@ func newDisposableObjectContainer[T any](parent *ObjectPool[T], data *T) *Dispos
 		target:  1,
 		mutex:   new(sync.Mutex),
 	}
+}
+
+// reset restores a container pulled back out of the pool to a fresh,
+// single-owner disposal state. Must only be called while the container is
+// not referenced by anyone else, i.e. right after it is popped from the
+// pool's free list inside Obtain.
+func (d *DisposableObjectContainer[T]) reset() {
+	d.mutex.Lock()
+	defer d.mutex.Unlock()
+	d.current = 0
+	d.target = 1
 }
 
 func (d *DisposableObjectContainer[T]) Data() (*T, error) {
