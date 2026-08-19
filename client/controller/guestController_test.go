@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -31,7 +33,7 @@ func TestRoomJoinStepAccepted(t *testing.T) {
 	client, server := newConnectedClient(t)
 
 	done := make(chan error, 1)
-	go func() { done <- roomJoinStep(client, "ROOM1") }()
+	go func() { done <- roomJoinStep(client, "ROOM1", nil) }()
 
 	respondToJoinRoom(t, server, 1)
 
@@ -44,7 +46,7 @@ func TestRoomJoinStepDenied(t *testing.T) {
 	client, server := newConnectedClient(t)
 
 	done := make(chan error, 1)
-	go func() { done <- roomJoinStep(client, "ROOM1") }()
+	go func() { done <- roomJoinStep(client, "ROOM1", nil) }()
 
 	respondToJoinRoom(t, server, 0)
 
@@ -55,6 +57,48 @@ func TestRoomJoinStepDenied(t *testing.T) {
 	}
 	if denied.RoomId != "ROOM1" {
 		t.Fatalf("expected room id %q, got %q", "ROOM1", denied.RoomId)
+	}
+}
+
+// TestRoomJoinStepReportsTransporterError is a regression test: a real live
+// run surfaced that a transporter-side error response (e.g. "room not
+// found", sent with CommandErrorResponseMask rather than
+// CommandResponseMask) was falling through to the generic "unexpected
+// command" branch instead of being reported as the actual server error,
+// because — unlike Handshake and createRoom — roomJoinStep never checked
+// message.IsError() first.
+func TestRoomJoinStepReportsTransporterError(t *testing.T) {
+	client, server := newConnectedClient(t)
+
+	done := make(chan error, 1)
+	go func() { done <- roomJoinStep(client, "ROOM1", nil) }()
+
+	request := readMessage(t, server)
+	if request.Command() != protocol.CommandJoinRoom {
+		t.Fatalf("expected a join room request, got %x", request.Command())
+	}
+	response := protocol.CreateTransporterMessage()
+	response.SetErrorResponseCommand(protocol.CommandJoinRoom)
+	if err := response.SetErrorPayload(&protocol.TransporterMessagePayloadError{
+		ErrorCode:    protocol.ErrorRoomNotFound,
+		ErrorMessage: "room not found",
+	}); err != nil {
+		t.Fatalf("SetErrorPayload failed: %s", err)
+	}
+	if err := response.Write(server); err != nil {
+		t.Fatalf("failed to write the response: %s", err)
+	}
+
+	err := <-done
+	if err == nil {
+		t.Fatalf("expected an error")
+	}
+	var denied *ErrJoinRoomDenied
+	if errors.As(err, &denied) {
+		t.Fatalf("expected a transporter error, not ErrJoinRoomDenied: %v", err)
+	}
+	if !strings.Contains(err.Error(), "room not found") {
+		t.Fatalf("expected the error to surface the server's message, got: %s", err)
 	}
 }
 
@@ -76,9 +120,17 @@ func TestJoinAsGuestRelaysAdbTraffic(t *testing.T) {
 	client, server := newConnectedClient(t)
 	port := freeLocalPort(t)
 
+	var events []GuestEvent
+	var eventsMu sync.Mutex
+	onEvent := func(e GuestEvent) {
+		eventsMu.Lock()
+		defer eventsMu.Unlock()
+		events = append(events, e)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- JoinAsGuest(ctx, client, "ROOM1", port) }()
+	go func() { done <- JoinAsGuest(ctx, client, "ROOM1", port, onEvent) }()
 
 	respondToJoinRoom(t, server, 1)
 
@@ -156,6 +208,22 @@ func TestJoinAsGuestRelaysAdbTraffic(t *testing.T) {
 	}
 	if received.Command() != adb.CommandOkay {
 		t.Fatalf("expected command %x, got %x", adb.CommandOkay, received.Command())
+	}
+
+	eventsMu.Lock()
+	gotKinds := make([]GuestEventKind, len(events))
+	for i, e := range events {
+		gotKinds[i] = e.Kind
+	}
+	eventsMu.Unlock()
+	wantKinds := []GuestEventKind{GuestJoinDecided, GuestProxyReady, GuestLocalAdbConnected}
+	if len(gotKinds) < len(wantKinds) {
+		t.Fatalf("expected at least %v, got %v", wantKinds, gotKinds)
+	}
+	for i, want := range wantKinds {
+		if gotKinds[i] != want {
+			t.Fatalf("expected event #%d to be %v, got %v (all: %v)", i, want, gotKinds[i], gotKinds)
+		}
 	}
 
 	cancel()
