@@ -1,0 +1,304 @@
+package roomManager
+
+import (
+	"adb-remote.maci.team/shared/protocol"
+	"adb-remote.maci.team/transporter/config"
+	"adb-remote.maci.team/transporter/manager/connectionManager"
+	"io"
+	"log/slog"
+	"net"
+	"testing"
+	"time"
+)
+
+func newTestLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func freeLocalAddress(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to find a free port: %s", err)
+	}
+	address := listener.Addr().String()
+	_ = listener.Close()
+	return address
+}
+
+// startTestSystem wires a ConnectionManager and RoomManager together exactly
+// like the real transporter binary does, on an ephemeral local port.
+func startTestSystem(t *testing.T) string {
+	t.Helper()
+	address := freeLocalAddress(t)
+	cm := connectionManager.CreateConnectionManager(&config.TransporterConfiguration{Address: address}, newTestLogger())
+	rm := CreateRoomManager(cm, newTestLogger())
+
+	started := make(chan struct{})
+	go func() {
+		go func() { _ = cm.StartServer() }()
+		for i := 0; i < 100; i++ {
+			if conn, err := net.DialTimeout("tcp", address, 50*time.Millisecond); err == nil {
+				_ = conn.Close()
+				close(started)
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		close(started)
+	}()
+	<-started
+
+	t.Cleanup(func() {
+		rm.Stop()
+		cm.Stop()
+	})
+	return address
+}
+
+// testClient is a minimal raw-protocol client used to drive the transporter
+// from the outside, the same way the real client/transportLayer.Client does.
+type testClient struct {
+	t        *testing.T
+	conn     net.Conn
+	clientId string
+}
+
+func dialTestClient(t *testing.T, address string) *testClient {
+	t.Helper()
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatalf("failed to dial the server: %s", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	tc := &testClient{t: t, conn: conn}
+	tc.connect()
+	return tc
+}
+
+func (tc *testClient) connect() {
+	tc.t.Helper()
+	request := protocol.CreateTransporterMessage()
+	request.SetDirectCommand(protocol.CommandConnect)
+	if err := request.SetPayloadConnect(&protocol.TransporterMessagePayloadConnect{ProtocolVersion: protocol.ProtocolVersion}); err != nil {
+		tc.t.Fatalf("SetPayloadConnect failed: %s", err)
+	}
+	if err := request.Write(tc.conn); err != nil {
+		tc.t.Fatalf("failed to write the CNXN request: %s", err)
+	}
+	response := tc.readMessage()
+	payload, err := response.GetPayloadConnectResponse()
+	if err != nil {
+		tc.t.Fatalf("GetPayloadConnectResponse failed: %s", err)
+	}
+	tc.clientId = payload.ClientId
+}
+
+func (tc *testClient) readMessage() *protocol.TransporterMessage {
+	tc.t.Helper()
+	_ = tc.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	message := protocol.CreateTransporterMessage()
+	if err := message.Read(tc.conn); err != nil {
+		tc.t.Fatalf("failed to read a message: %s", err)
+	}
+	return message
+}
+
+func (tc *testClient) createRoom() string {
+	tc.t.Helper()
+	request := protocol.CreateTransporterMessage()
+	request.SetDirectCommand(protocol.CommandCreateRoom)
+	if err := request.Write(tc.conn); err != nil {
+		tc.t.Fatalf("failed to write the create-room request: %s", err)
+	}
+	response := tc.readMessage()
+	if response.IsError() {
+		payload, _ := response.GetErrorPayload()
+		tc.t.Fatalf("create room failed: %+v", payload)
+	}
+	payload, err := response.GetPayloadCreateRoomResponse()
+	if err != nil {
+		tc.t.Fatalf("GetPayloadCreateRoomResponse failed: %s", err)
+	}
+	return payload.RoomId
+}
+
+func (tc *testClient) joinRoom(roomId string) {
+	tc.t.Helper()
+	request := protocol.CreateTransporterMessage()
+	request.SetDirectCommand(protocol.CommandJoinRoom)
+	if err := request.SetPayloadConnectRoom(&protocol.TransporterMessagePayloadConnectRoom{RoomId: roomId}); err != nil {
+		tc.t.Fatalf("SetPayloadConnectRoom failed: %s", err)
+	}
+	if err := request.Write(tc.conn); err != nil {
+		tc.t.Fatalf("failed to write the join-room request: %s", err)
+	}
+}
+
+func (tc *testClient) expectJoinRoomRequest() (roomId string, guestClientId string) {
+	tc.t.Helper()
+	message := tc.readMessage()
+	if message.Command() != protocol.CommandJoinRoom {
+		tc.t.Fatalf("expected a join room request, got %x", message.Command())
+	}
+	payload, err := message.GetPayloadConnectRoom()
+	if err != nil {
+		tc.t.Fatalf("GetPayloadConnectRoom failed: %s", err)
+	}
+	return payload.RoomId, payload.ClientId
+}
+
+func (tc *testClient) respondToJoinRoom(accepted int) {
+	tc.t.Helper()
+	response := protocol.CreateTransporterMessage()
+	response.SetResponseCommand(protocol.CommandJoinRoom)
+	if err := response.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{Accepted: accepted}); err != nil {
+		tc.t.Fatalf("SetPayloadConnectRoomResult failed: %s", err)
+	}
+	if err := response.Write(tc.conn); err != nil {
+		tc.t.Fatalf("failed to write the join-room response: %s", err)
+	}
+}
+
+func (tc *testClient) expectJoinRoomResponse() int {
+	tc.t.Helper()
+	message := tc.readMessage()
+	if message.Command() != protocol.CommandJoinRoom|protocol.CommandResponseMask {
+		tc.t.Fatalf("expected a join room response, got %x", message.Command())
+	}
+	payload, err := message.GetPayloadConnectRoomResponse()
+	if err != nil {
+		tc.t.Fatalf("GetPayloadConnectRoomResponse failed: %s", err)
+	}
+	return payload.Accepted
+}
+
+func (tc *testClient) sendAdbTransport(raw []byte) {
+	tc.t.Helper()
+	message := protocol.CreateTransporterMessage()
+	message.SetDirectCommand(protocol.CommandAdbTransport)
+	if err := message.SetRawPayload(raw); err != nil {
+		tc.t.Fatalf("SetRawPayload failed: %s", err)
+	}
+	if err := message.Write(tc.conn); err != nil {
+		tc.t.Fatalf("failed to write the adb transport message: %s", err)
+	}
+}
+
+func (tc *testClient) expectAdbTransport() []byte {
+	tc.t.Helper()
+	message := tc.readMessage()
+	if message.Command() != protocol.CommandAdbTransport {
+		tc.t.Fatalf("expected an adb transport message, got %x", message.Command())
+	}
+	return append([]byte{}, message.Payload()...)
+}
+
+func joinRoomAndAccept(t *testing.T, owner *testClient, guest *testClient, roomId string) {
+	t.Helper()
+	guest.joinRoom(roomId)
+	_, guestClientId := owner.expectJoinRoomRequest()
+	if guestClientId != guest.clientId {
+		t.Fatalf("expected the guest's client id %q in the join request, got %q", guest.clientId, guestClientId)
+	}
+	owner.respondToJoinRoom(1)
+	if accepted := guest.expectJoinRoomResponse(); accepted != 1 {
+		t.Fatalf("expected the join room request to be accepted")
+	}
+}
+
+func TestCreateAndJoinRoomAccepted(t *testing.T) {
+	address := startTestSystem(t)
+	owner := dialTestClient(t, address)
+	guest := dialTestClient(t, address)
+
+	roomId := owner.createRoom()
+	joinRoomAndAccept(t, owner, guest, roomId)
+}
+
+func TestJoinRoomDeclined(t *testing.T) {
+	address := startTestSystem(t)
+	owner := dialTestClient(t, address)
+	guest := dialTestClient(t, address)
+
+	roomId := owner.createRoom()
+	guest.joinRoom(roomId)
+	owner.expectJoinRoomRequest()
+	owner.respondToJoinRoom(0)
+	if accepted := guest.expectJoinRoomResponse(); accepted != 0 {
+		t.Fatalf("expected the join room request to be declined")
+	}
+}
+
+func TestJoinRoomNotFound(t *testing.T) {
+	address := startTestSystem(t)
+	guest := dialTestClient(t, address)
+
+	guest.joinRoom("does-not-exist")
+	response := guest.readMessage()
+	if !response.IsError() {
+		t.Fatalf("expected an error response for an unknown room")
+	}
+	payload, err := response.GetErrorPayload()
+	if err != nil {
+		t.Fatalf("GetErrorPayload failed: %s", err)
+	}
+	if payload.ErrorCode != protocol.ErrorRoomNotFound {
+		t.Fatalf("expected error code %d, got %d", protocol.ErrorRoomNotFound, payload.ErrorCode)
+	}
+}
+
+// TestAdbTransportIsRelayedBetweenRoomParticipants exercises the core
+// missing feature: once a room is established, opaque ADB transport
+// messages sent by either participant must be forwarded to the other.
+func TestAdbTransportIsRelayedBetweenRoomParticipants(t *testing.T) {
+	address := startTestSystem(t)
+	owner := dialTestClient(t, address)
+	guest := dialTestClient(t, address)
+
+	roomId := owner.createRoom()
+	joinRoomAndAccept(t, owner, guest, roomId)
+
+	guestToOwner := []byte("guest->owner adb bytes")
+	guest.sendAdbTransport(guestToOwner)
+	if received := owner.expectAdbTransport(); string(received) != string(guestToOwner) {
+		t.Fatalf("expected owner to receive %q, got %q", guestToOwner, received)
+	}
+
+	ownerToGuest := []byte("owner->guest adb bytes")
+	owner.sendAdbTransport(ownerToGuest)
+	if received := guest.expectAdbTransport(); string(received) != string(ownerToGuest) {
+		t.Fatalf("expected guest to receive %q, got %q", ownerToGuest, received)
+	}
+}
+
+func TestAdbTransportOutsideRoomIsDropped(t *testing.T) {
+	address := startTestSystem(t)
+	lonely := dialTestClient(t, address)
+
+	lonely.sendAdbTransport([]byte("nobody listening"))
+
+	_ = lonely.conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	message := protocol.CreateTransporterMessage()
+	err := message.Read(lonely.conn)
+	if err == nil {
+		t.Fatalf("did not expect any message to be relayed back to a client outside of a room")
+	}
+}
+
+func TestOwnerDisconnectClosesGuestConnection(t *testing.T) {
+	address := startTestSystem(t)
+	owner := dialTestClient(t, address)
+	guest := dialTestClient(t, address)
+
+	roomId := owner.createRoom()
+	joinRoomAndAccept(t, owner, guest, roomId)
+
+	_ = owner.conn.Close()
+
+	buffer := make([]byte, 1)
+	_ = guest.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := guest.conn.Read(buffer); err != io.EOF {
+		t.Fatalf("expected the guest connection to be closed when the room owner disconnects, got err=%v", err)
+	}
+}
