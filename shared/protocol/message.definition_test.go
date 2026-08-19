@@ -63,6 +63,33 @@ func TestWireSize(t *testing.T) {
 	}
 }
 
+func TestBytesRoundTripsThroughWriteAndRead(t *testing.T) {
+	m := CreateTransporterMessage()
+	m.SetDirectCommand(CommandJoinRoom)
+	if err := m.SetRawPayload([]byte("payload-data")); err != nil {
+		t.Fatalf("SetRawPayload failed: %s", err)
+	}
+	if uint32(len(m.Bytes())) != m.WireSize() {
+		t.Fatalf("expected Bytes() length %d to match WireSize() %d", len(m.Bytes()), m.WireSize())
+	}
+
+	buffer := &bytes.Buffer{}
+	if err := m.Write(buffer); err != nil {
+		t.Fatalf("Write failed: %s", err)
+	}
+	if !bytes.Equal(buffer.Bytes(), m.Bytes()) {
+		t.Fatalf("expected Bytes() to match what Write actually sent")
+	}
+
+	received := CreateTransporterMessage()
+	if err := received.Read(bytes.NewReader(buffer.Bytes())); err != nil {
+		t.Fatalf("Read failed: %s", err)
+	}
+	if !bytes.Equal(received.Bytes(), m.Bytes()) {
+		t.Fatalf("expected a round-tripped message's Bytes() to match the original")
+	}
+}
+
 func TestWriteThenReadRoundTrip(t *testing.T) {
 	m := CreateTransporterMessage()
 	m.SetDirectCommand(CommandJoinRoom)

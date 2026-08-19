@@ -10,6 +10,8 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -208,6 +210,48 @@ func TestBytesSentAndReceivedTrackWireTraffic(t *testing.T) {
 
 	if got := client.BytesReceived(); got != wantReceived {
 		t.Fatalf("expected BytesReceived %d after one message, got %d", wantReceived, got)
+	}
+}
+
+// TestEnableDebugCaptureRecordsBothDirections is a regression test for the
+// debug-verbosity packet capture: once enabled, both outgoing and incoming
+// messages must land in the pcap file, and the file must be readable
+// (non-empty, past the global header) once the client is closed.
+func TestEnableDebugCaptureRecordsBothDirections(t *testing.T) {
+	client, server := newConnectedTestClient(t)
+
+	capturePath := filepath.Join(t.TempDir(), "capture.pcap")
+	if err := client.EnableDebugCapture(capturePath); err != nil {
+		t.Fatalf("EnableDebugCapture failed: %s", err)
+	}
+
+	if err := client.SendConnect(); err != nil {
+		t.Fatalf("SendConnect failed: %s", err)
+	}
+	readMessage(t, server)
+
+	outgoing := protocol.CreateTransporterMessage()
+	outgoing.SetResponseCommand(protocol.CommandConnect)
+	if err := outgoing.SetPayloadConnectResponse(&protocol.TransporterMessagePayloadConnectResponse{ClientId: "ABCD1234"}); err != nil {
+		t.Fatalf("SetPayloadConnectResponse failed: %s", err)
+	}
+	if err := outgoing.Write(server); err != nil {
+		t.Fatalf("failed to write from the server: %s", err)
+	}
+	container := <-client.Messages()
+	container.Dispose()
+
+	client.Close()
+
+	data, err := os.ReadFile(capturePath)
+	if err != nil {
+		t.Fatalf("failed to read the capture file: %s", err)
+	}
+	// 24 byte global header + at least two packet records (16 byte header
+	// each, plus a non-empty frame) for the one outgoing and one incoming
+	// message above.
+	if len(data) <= 24+16+16 {
+		t.Fatalf("expected the capture file to contain at least two packet records, got %d bytes", len(data))
 	}
 }
 

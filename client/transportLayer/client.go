@@ -3,6 +3,7 @@ package transportLayer
 import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/config"
+	"adb-remote.maci.team/client/pcapwriter"
 	"adb-remote.maci.team/shared/protocol"
 	"adb-remote.maci.team/shared/utils"
 	"context"
@@ -10,8 +11,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const messageChannelBufferSize = 0
@@ -41,6 +44,11 @@ type Client struct {
 	bytesSent     atomic.Uint64
 	bytesReceived atomic.Uint64
 
+	// capture is non-nil only when debug packet capture is enabled (see
+	// EnableDebugCapture); nil-checked on every send/receive so the common
+	// case stays a single atomic load.
+	capture atomic.Pointer[packetCapture]
+
 	//Dependencies
 	transporterMessagePool *utils.ObjectPool[protocol.TransporterMessage]
 	Logger                 *slog.Logger
@@ -67,6 +75,43 @@ func CreateClient(logger *slog.Logger, config *config.ClientConfiguration) (*Cli
 // owns the returned container and must Dispose it once done.
 func (c *Client) Messages() <-chan *MessageContainer {
 	return c.messageChannel
+}
+
+// packetCapture bundles a pcap writer with the file it owns, so Close can
+// flush/close it.
+type packetCapture struct {
+	writer *pcapwriter.Writer
+	file   *os.File
+}
+
+// EnableDebugCapture starts recording every message this client sends and
+// receives to a pcap file at path (see client/pcapwriter for what "capture"
+// means here — the plaintext protocol traffic, not real packets off a
+// NIC). Meant for debug-verbosity logging; safe to call before or after
+// Start().
+func (c *Client) EnableDebugCapture(path string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("failed to create the packet capture file: %w", err)
+	}
+	writer, err := pcapwriter.NewWriter(file)
+	if err != nil {
+		_ = file.Close()
+		return fmt.Errorf("failed to write the packet capture header: %w", err)
+	}
+	c.capture.Store(&packetCapture{writer: writer, file: file})
+	return nil
+}
+
+// recordCapture is a no-op unless EnableDebugCapture has been called.
+func (c *Client) recordCapture(direction pcapwriter.Direction, data []byte) {
+	capture := c.capture.Load()
+	if capture == nil {
+		return
+	}
+	if err := capture.writer.WritePacket(direction, data, time.Now()); err != nil {
+		c.Logger.Error(fmt.Sprintf("Failed to write a packet capture record: %s", err))
+	}
 }
 
 // Start dials the transporter over TLS. The transporter's certificate is
@@ -117,6 +162,7 @@ func (c *Client) startReader(ctx context.Context) {
 			return
 		}
 		c.bytesReceived.Add(uint64(message.WireSize()))
+		c.recordCapture(pcapwriter.Incoming, message.Bytes())
 		select {
 		case c.messageChannel <- container:
 		case <-ctx.Done():
@@ -134,6 +180,9 @@ func (c *Client) Close() {
 	if c.connection != nil {
 		_ = c.connection.Close()
 	}
+	if capture := c.capture.Load(); capture != nil {
+		_ = capture.file.Close()
+	}
 }
 
 // writeMessage serializes m onto the wire; see the writeMutex field comment
@@ -145,6 +194,7 @@ func (c *Client) writeMessage(m *protocol.TransporterMessage) error {
 		return err
 	}
 	c.bytesSent.Add(uint64(m.WireSize()))
+	c.recordCapture(pcapwriter.Outgoing, m.Bytes())
 	return nil
 }
 

@@ -16,6 +16,7 @@ import (
 
 func CreateContainer() *container.Container {
 	cont := container.New()
+	registerLogLevel(&cont)
 	registerLogger(&cont)
 	registerConfig(&cont)
 	registerClient(&cont)
@@ -28,11 +29,26 @@ func CreateContainer() *container.Container {
 // logFilePath is where client logs go. Both `share` and `connect` run a
 // full-screen TUI on stdout (see client/tui); a log line writing straight
 // to stdout out-of-band would corrupt that rendering, so logs go to a file
-// instead.
+// instead. pcapFilePath sits next to it, written only when -verbosity=debug
+// enables packet capture (see transportLayer.Client.EnableDebugCapture).
 var logFilePath = filepath.Join(os.TempDir(), "adb-remote-client.log")
+var pcapFilePath = filepath.Join(os.TempDir(), "adb-remote-client.pcap")
+
+// registerLogLevel provides the mutable *slog.LevelVar the logger is built
+// with. It starts at the zero value (slog.LevelInfo); ParseCommand raises
+// it to Debug once it has parsed a command's -verbosity flag, which is
+// necessarily after this container (and so the logger) already exists.
+func registerLogLevel(container *container.Container) {
+	err := container.Singleton(func() *slog.LevelVar {
+		return new(slog.LevelVar)
+	})
+	if err != nil {
+		panic(err)
+	}
+}
 
 func registerLogger(container *container.Container) {
-	err := container.Singleton(func() *slog.Logger {
+	err := container.Singleton(func(logLevel *slog.LevelVar) *slog.Logger {
 		var writer io.Writer
 		logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if err != nil {
@@ -40,7 +56,7 @@ func registerLogger(container *container.Container) {
 		} else {
 			writer = logFile
 		}
-		return slog.New(prettyLogHandler.CreatePrettyHandler(writer, &slog.HandlerOptions{}))
+		return slog.New(prettyLogHandler.CreatePrettyHandler(writer, &slog.HandlerOptions{Level: logLevel}))
 	})
 	if err != nil {
 		panic(err)
@@ -96,10 +112,11 @@ func registerCommands(container *container.Container) {
 		smartSocket adb.IAdbSmartSocket,
 		clientIdentity *identity.Identity,
 		config *config.ClientConfiguration,
+		logLevel *slog.LevelVar,
 	) []*command.Command[command.BaseCommand] {
 		return []*command.Command[command.BaseCommand]{
-			command.CreateShareCommand(logger, client, smartSocket, clientIdentity, config),
-			command.CreateConnectCommand(logger, client, smartSocket, clientIdentity, config),
+			command.CreateShareCommand(logger, client, smartSocket, clientIdentity, config, logLevel, pcapFilePath),
+			command.CreateConnectCommand(logger, client, smartSocket, clientIdentity, config, logLevel, pcapFilePath),
 		}
 	})
 	if err != nil {

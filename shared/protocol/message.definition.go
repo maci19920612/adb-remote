@@ -44,6 +44,14 @@ func (m *TransporterMessage) WireSize() uint32 {
 	return HeaderSize + m.PayloadLength()
 }
 
+// Bytes returns the full wire representation (header + payload) of the
+// message, as it currently stands. The caller must not retain the returned
+// slice past the message's next reuse (e.g. once its pool container is
+// disposed), since it aliases the message's own buffer.
+func (m *TransporterMessage) Bytes() []byte {
+	return m.messageBuffer[:HeaderSize+m.PayloadLength()]
+}
+
 // Payload returns the raw payload bytes currently held by the message,
 // sliced to the length recorded in the header.
 func (m *TransporterMessage) Payload() []byte {

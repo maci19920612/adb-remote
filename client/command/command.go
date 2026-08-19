@@ -2,12 +2,25 @@ package command
 
 import (
 	"errors"
+	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 )
 
 var InvalidCommandArgumentType = errors.New("invalid command argument type")
+
+// VerbosityDebug is the -verbosity flag value that enables debug logging
+// and packet capture (see ParseCommand).
+const VerbosityDebug = "debug"
+
+// RegisterVerbosityFlag adds the -verbosity flag shared by every command:
+// "default" (the normal log level) or "debug" (debug-level logging, plus a
+// packet capture .pcap file — see transportLayer.Client.EnableDebugCapture).
+func RegisterVerbosityFlag(flagSet *flag.FlagSet) *string {
+	return flagSet.String("verbosity", "default", `Logging verbosity: "default" or "debug" (debug also writes a packet capture .pcap file next to the log)`)
+}
 
 func printGlobalHelp(commands []*Command[BaseCommand]) {
 	fmt.Println("Program usage [command] [...args]")
@@ -54,6 +67,15 @@ func ParseCommand(commands []*Command[BaseCommand]) error {
 	if parameter.IsHelp() {
 		targetFlagSet.Usage()
 		return nil
+	}
+
+	if parameter.Verbosity() == VerbosityDebug {
+		if targetCommand.LogLevel != nil {
+			targetCommand.LogLevel.Set(slog.LevelDebug)
+		}
+		if err := targetCommand.Client.EnableDebugCapture(targetCommand.PcapPath); err != nil {
+			return fmt.Errorf("failed to enable debug packet capture: %w", err)
+		}
 	}
 
 	if err := targetCommand.Client.Start(); err != nil {

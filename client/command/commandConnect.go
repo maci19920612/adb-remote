@@ -17,6 +17,8 @@ func CreateConnectCommand(
 	smartSocket adb.IAdbSmartSocket,
 	guestIdentity *identity.Identity,
 	config *config.ClientConfiguration,
+	logLevel *slog.LevelVar,
+	pcapPath string,
 ) *Command[BaseCommand] {
 	return &Command[BaseCommand]{
 		Name: "connect",
@@ -31,12 +33,14 @@ func CreateConnectCommand(
 			flagSet := flag.NewFlagSet("connect", flag.ExitOnError)
 			targetRoomId := flagSet.String("targetRoomId", "", "The target room ID")
 			localPort := flagSet.String("port", adb.DefaultProxyPort, "The local port to expose the remote device on, for \"adb connect\" to use")
+			verbosity := RegisterVerbosityFlag(flagSet)
 			getHelp := flagSet.Bool("help", false, "Print this help")
 			return &commandConnectArgs{
-				FlagSet:      flagSet,
-				GetHelp:      getHelp,
-				TargetRoomId: targetRoomId,
-				LocalPort:    localPort,
+				FlagSet:       flagSet,
+				GetHelp:       getHelp,
+				TargetRoomId:  targetRoomId,
+				LocalPort:     localPort,
+				VerbosityFlag: verbosity,
 			}, nil
 		},
 
@@ -45,14 +49,17 @@ func CreateConnectCommand(
 		Client:      client,
 		Config:      config,
 		SmartSocket: smartSocket,
+		LogLevel:    logLevel,
+		PcapPath:    pcapPath,
 	}
 }
 
 type commandConnectArgs struct {
-	FlagSet      *flag.FlagSet
-	GetHelp      *bool
-	TargetRoomId *string
-	LocalPort    *string
+	FlagSet       *flag.FlagSet
+	GetHelp       *bool
+	TargetRoomId  *string
+	LocalPort     *string
+	VerbosityFlag *string
 }
 
 func (c *commandConnectArgs) GetFlagSet() *flag.FlagSet {
@@ -61,4 +68,8 @@ func (c *commandConnectArgs) GetFlagSet() *flag.FlagSet {
 
 func (c *commandConnectArgs) IsHelp() bool {
 	return *c.GetHelp
+}
+
+func (c *commandConnectArgs) Verbosity() string {
+	return *c.VerbosityFlag
 }

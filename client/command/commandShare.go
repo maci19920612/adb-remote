@@ -22,6 +22,8 @@ func CreateShareCommand(
 	smartSocket adb.IAdbSmartSocket,
 	ownerIdentity *identity.Identity,
 	config *config.ClientConfiguration,
+	logLevel *slog.LevelVar,
+	pcapPath string,
 ) *Command[BaseCommand] {
 	return &Command[BaseCommand]{
 		Name: "share",
@@ -40,6 +42,7 @@ func CreateShareCommand(
 			targetDevice := flagSet.String("targetDevice", "", "The device ID to share; skips the device picker if set")
 			autoAccept := flagSet.Bool("yes", false, "Automatically accept every room join request instead of prompting")
 			sessionTimeoutMinutes := flagSet.Int("sessionTimeout", DefaultSessionTimeoutMinutes, "Minutes before the room is automatically closed; -1 disables the timeout")
+			verbosity := RegisterVerbosityFlag(flagSet)
 			getHelp := flagSet.Bool("help", false, "Print this help")
 			return &commandShareArgs{
 				FlagSet:               flagSet,
@@ -47,6 +50,7 @@ func CreateShareCommand(
 				TargetDevice:          targetDevice,
 				AutoAccept:            autoAccept,
 				SessionTimeoutMinutes: sessionTimeoutMinutes,
+				VerbosityFlag:         verbosity,
 			}, nil
 		},
 
@@ -55,6 +59,8 @@ func CreateShareCommand(
 		Client:      client,
 		Config:      config,
 		SmartSocket: smartSocket,
+		LogLevel:    logLevel,
+		PcapPath:    pcapPath,
 	}
 }
 
@@ -64,6 +70,7 @@ type commandShareArgs struct {
 	TargetDevice          *string
 	AutoAccept            *bool
 	SessionTimeoutMinutes *int
+	VerbosityFlag         *string
 }
 
 func (c *commandShareArgs) GetFlagSet() *flag.FlagSet {
@@ -72,4 +79,8 @@ func (c *commandShareArgs) GetFlagSet() *flag.FlagSet {
 
 func (c *commandShareArgs) IsHelp() bool {
 	return *c.GetHelp
+}
+
+func (c *commandShareArgs) Verbosity() string {
+	return *c.VerbosityFlag
 }
