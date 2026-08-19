@@ -3,42 +3,55 @@ package transportLayer
 import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/config"
-	"adb-remote.maci.team/shared"
 	"adb-remote.maci.team/shared/protocol"
+	"adb-remote.maci.team/shared/utils"
 	"context"
 	"fmt"
-	"hash/crc32"
 	"log/slog"
 	"net"
 )
 
 const messageChannelBufferSize = 0
 
+// MessageContainer is the pooled, disposable handle a caller receives for
+// every message read off the wire. The caller must call Dispose once done
+// reading it so the underlying buffer can be reused.
+type MessageContainer = utils.DisposableObjectContainer[protocol.TransporterMessage]
+
 type Client struct {
-	connection     *net.Conn
-	context        *context.Context
-	cancelFunc     *context.CancelFunc
-	MessageChannel chan *protocol.TransporterMessage
+	connection net.Conn
+	cancelFunc context.CancelFunc
+
+	messageChannel chan *MessageContainer
 
 	//Dependencies
-	TransporterMessagePool *shared.TransportMessagePool
+	transporterMessagePool *utils.ObjectPool[protocol.TransporterMessage]
 	Logger                 *slog.Logger
 	Config                 *config.ClientConfiguration
 }
 
 func CreateClient(logger *slog.Logger, config *config.ClientConfiguration) (*Client, error) {
-
+	factory := func() *protocol.TransporterMessage {
+		return protocol.CreateTransporterMessage()
+	}
 	client := &Client{
-		MessageChannel: make(chan *protocol.TransporterMessage, messageChannelBufferSize),
+		messageChannel: make(chan *MessageContainer, messageChannelBufferSize),
 
 		//Dependencies
-		TransporterMessagePool: shared.CreateTransporterMessagePool(),
+		transporterMessagePool: utils.NewObjectPool(factory),
 		Logger:                 logger,
 		Config:                 config,
 	}
 
 	return client, nil
 }
+
+// Messages yields every TransporterMessage read off the wire. The receiver
+// owns the returned container and must Dispose it once done.
+func (c *Client) Messages() <-chan *MessageContainer {
+	return c.messageChannel
+}
+
 func (c *Client) Start() error {
 	address := c.Config.TransporterAddress
 	connection, err := net.Dial("tcp", address)
@@ -46,150 +59,135 @@ func (c *Client) Start() error {
 		return err
 	}
 	ctx, cancelFunc := context.WithCancel(context.Background())
-	c.context = &ctx
-	c.cancelFunc = &cancelFunc
-	c.connection = &connection
-	go c.startReader()
+	c.cancelFunc = cancelFunc
+	c.connection = connection
+	go c.startReader(ctx)
 	return nil
 }
 
-func (c *Client) startReader() {
+func (c *Client) startReader(ctx context.Context) {
 	log := c.Logger
-	mPool := c.TransporterMessagePool
-	ctx := *c.context
+	pool := c.transporterMessagePool
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			log.Info("Connection reader cancelled")
-			break
-		default:
-			m := mPool.Obtain()
-			err := m.Read(c.connection)
-			if err != nil {
-				log.Error("%s error happened during reading: ", err)
-			}
-			c.MessageChannel <- m
+			return
+		}
+		container := pool.Obtain()
+		message, err := container.Data()
+		if err != nil {
+			// The container was handed back to us in a disposed state,
+			// which can only happen if the pool itself is broken.
+			log.Error(fmt.Sprintf("Unusable pooled message container: %s", err))
+			_ = container.Dispose()
+			return
+		}
+		if err := message.Read(c.connection); err != nil {
+			log.Error(fmt.Sprintf("Error happened during reading: %s", err))
+			_ = container.Dispose()
+			return
+		}
+		select {
+		case c.messageChannel <- container:
+		case <-ctx.Done():
+			_ = container.Dispose()
+			return
 		}
 	}
 }
 
+// Close terminates the connection and stops the background reader.
 func (c *Client) Close() {
-	conn := *c.connection
-	cancelFunc := *c.cancelFunc
-	_ = conn.Close()
-	cancelFunc()
+	if c.cancelFunc != nil {
+		c.cancelFunc()
+	}
+	if c.connection != nil {
+		_ = c.connection.Close()
+	}
 }
 
-func (c *Client) Release(message *protocol.TransporterMessage) {
-	c.TransporterMessagePool.Release(message)
+// withMessage obtains a pooled message, hands it to fn, and disposes of it
+// once fn returns.
+func (c *Client) withMessage(fn func(*protocol.TransporterMessage) error) error {
+	container := c.transporterMessagePool.Obtain()
+	defer container.Dispose()
+	message, err := container.Data()
+	if err != nil {
+		return err
+	}
+	return fn(message)
 }
 
 func (c *Client) SendError(command uint32, errorCode int, errorMessage string) error {
-	log := c.Logger
-	mPool := c.TransporterMessagePool
-	log.Info(fmt.Sprintf("SendError(%d, %s) called", errorCode, errorMessage))
-
-	errorTransporterMessage := mPool.Obtain()
-	errorTransporterMessage.SetErrorResponseCommand(command)
-	err := errorTransporterMessage.SetErrorPayload(&protocol.TransporterMessagePayloadError{
-		ErrorCode:    errorCode,
-		ErrorMessage: errorMessage,
+	c.Logger.Info(fmt.Sprintf("SendError(%d, %s) called", errorCode, errorMessage))
+	return c.withMessage(func(m *protocol.TransporterMessage) error {
+		m.SetErrorResponseCommand(command)
+		if err := m.SetErrorPayload(&protocol.TransporterMessagePayloadError{
+			ErrorCode:    errorCode,
+			ErrorMessage: errorMessage,
+		}); err != nil {
+			return err
+		}
+		return m.Write(c.connection)
 	})
-	if err != nil {
-		return err
-	}
-	return errorTransporterMessage.Write(c.connection)
 }
 
 func (c *Client) SendConnect() error {
-	log := c.Logger
-	mPool := c.TransporterMessagePool
-
-	log.Info("SendConnect called")
-
-	m := mPool.Obtain()
-	defer mPool.Release(m)
-	m.SetDirectCommand(protocol.CommandConnect)
-	err := m.SetPayloadConnect(&protocol.TransporterMessagePayloadConnect{
-		ProtocolVersion: protocol.ProtocolVersion,
+	c.Logger.Info("SendConnect called")
+	return c.withMessage(func(m *protocol.TransporterMessage) error {
+		m.SetDirectCommand(protocol.CommandConnect)
+		if err := m.SetPayloadConnect(&protocol.TransporterMessagePayloadConnect{
+			ProtocolVersion: protocol.ProtocolVersion,
+		}); err != nil {
+			return err
+		}
+		return m.Write(c.connection)
 	})
-	if err != nil {
-		return err
-	}
-	err = m.Write(c.connection)
-	return err
 }
 
 func (c *Client) SendCreateRoom() error {
-	log := c.Logger
-	mPool := c.TransporterMessagePool
-
-	log.Info("SendCreateRoom called")
-	m := mPool.Obtain()
-	defer mPool.Release(m)
-
-	m.SetDirectCommand(protocol.CommandCreateRoom)
-	err := m.Write(c.connection)
-	return err
+	c.Logger.Info("SendCreateRoom called")
+	return c.withMessage(func(m *protocol.TransporterMessage) error {
+		m.SetDirectCommand(protocol.CommandCreateRoom)
+		return m.Write(c.connection)
+	})
 }
 
 func (c *Client) SendJoinRoom(roomId string) error {
-	log := c.Logger
-	mPool := c.TransporterMessagePool
-	m := mPool.Obtain()
-	defer mPool.Release(m)
-
-	log.Info("SendJoinRoom(%s) called", roomId)
-
-	m.SetDirectCommand(protocol.CommandJoinRoom)
-	err := m.SetPayloadConnectRoom(&protocol.TransporterMessagePayloadConnectRoom{
-		RoomId: roomId,
+	c.Logger.Info(fmt.Sprintf("SendJoinRoom(%s) called", roomId))
+	return c.withMessage(func(m *protocol.TransporterMessage) error {
+		m.SetDirectCommand(protocol.CommandJoinRoom)
+		if err := m.SetPayloadConnectRoom(&protocol.TransporterMessagePayloadConnectRoom{
+			RoomId: roomId,
+		}); err != nil {
+			return err
+		}
+		return m.Write(c.connection)
 	})
-	if err != nil {
-		return err
-	}
-	err = m.Write(c.connection)
-	return err
 }
 
 func (c *Client) SendJoinRoomResponse(isAccepted int) error {
-	log := c.Logger
-	mPool := c.TransporterMessagePool
-	m := mPool.Obtain()
-	defer mPool.Release(m)
-
-	log.Info("SendJoinRoomResponse(%d) called", isAccepted)
-
-	m.SetResponseCommand(protocol.CommandJoinRoom)
-	err := m.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{
-		Accepted: isAccepted,
+	c.Logger.Info(fmt.Sprintf("SendJoinRoomResponse(%d) called", isAccepted))
+	return c.withMessage(func(m *protocol.TransporterMessage) error {
+		m.SetResponseCommand(protocol.CommandJoinRoom)
+		if err := m.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{
+			Accepted: isAccepted,
+		}); err != nil {
+			return err
+		}
+		return m.Write(c.connection)
 	})
-	if err != nil {
-		return err
-	}
-	err = m.Write(c.connection)
-	return err
 }
 
+// SendAdbMessage forwards a raw ADB protocol message to the peer on the
+// other side of the room, opaque to everything in between.
 func (c *Client) SendAdbMessage(message *adb.AdbMessage) error {
-	var err error
-	logger := c.Logger
-	mPool := c.TransporterMessagePool
-	transportMessage := mPool.Obtain()
-	defer mPool.Release(transportMessage)
-
-	length := message.DataLength() + adb.HeaderSize
-	checksum := crc32.ChecksumIEEE(message.Data()[:length])
-
-	logger.Info("Sending ADB message to transport")
-	transportMessage.SetHeader(protocol.CommandAdbTransport, length, checksum)
-	err = transportMessage.WriteHeader(c.connection)
-	if err != nil {
-		return err
-	}
-	err = message.Write(c.connection)
-	if err != nil {
-		return err
-	}
-	return nil
+	c.Logger.Info("Sending ADB message to transport")
+	return c.withMessage(func(m *protocol.TransporterMessage) error {
+		m.SetDirectCommand(protocol.CommandAdbTransport)
+		if err := m.SetRawPayload(message.Bytes()); err != nil {
+			return err
+		}
+		return m.Write(c.connection)
+	})
 }
