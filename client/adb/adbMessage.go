@@ -5,14 +5,18 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"hash/crc32"
 	"io"
 	"strings"
 )
 
 const (
-	magicConstant    = 0xffffffff
-	MaxPayloadLength = 0x1000
+	magicConstant = 0xffffffff
+	// MaxPayloadLength is our advertised MAXDATA. The real ADB wire
+	// protocol allows much larger values (modern adb clients offer up to
+	// 1MiB), but this must stay comfortably within
+	// protocol.MaxPayloadSize, since a whole ADB message (header + data)
+	// is embedded verbatim as a TransporterMessage payload when relayed.
+	MaxPayloadLength = 0x8000
 	HeaderSize       = 0x0018
 )
 
@@ -49,12 +53,16 @@ func validateMagic(command uint32, magic uint32) error {
 	return nil
 }
 
-func validateData(data []byte, expectedCrc32 uint32) error {
-	actualCrc32 := crc32.ChecksumIEEE(data)
-	if actualCrc32 != expectedCrc32 {
-		return fmt.Errorf("invalid crc32, expected: %x, actual: %x", expectedCrc32, actualCrc32)
+// checksum reproduces the ADB wire protocol's "data_check" field: despite
+// the field name adb itself uses (and despite what a casual reading of the
+// protocol suggests), it is not a CRC32 — it is the sum of the payload
+// bytes as unsigned values, truncated to 32 bits.
+func checksum(data []byte) uint32 {
+	var sum uint32
+	for _, b := range data {
+		sum += uint32(b)
 	}
-	return nil
+	return sum
 }
 
 type AdbMessage struct {
@@ -62,7 +70,7 @@ type AdbMessage struct {
 	arg1          []byte
 	arg2          []byte
 	dataLength    []byte
-	dataCRC32     []byte
+	dataChecksum  []byte
 	magic         []byte
 	data          []byte
 	headerBuffer  []byte
@@ -91,8 +99,8 @@ func (c *AdbMessage) DataLength() uint32 {
 	return binary.LittleEndian.Uint32(c.dataLength)
 }
 
-func (c *AdbMessage) DataCRC32() uint32 {
-	return binary.LittleEndian.Uint32(c.dataCRC32)
+func (c *AdbMessage) DataChecksum() uint32 {
+	return binary.LittleEndian.Uint32(c.dataChecksum)
 }
 
 func (c *AdbMessage) Magic() uint32 {
@@ -119,7 +127,7 @@ func newMessageFromBuffer(messageBuffer []byte) *AdbMessage {
 		arg1:          messageBuffer[4:8],
 		arg2:          messageBuffer[8:12],
 		dataLength:    messageBuffer[12:16],
-		dataCRC32:     messageBuffer[16:20],
+		dataChecksum:  messageBuffer[16:20],
 		magic:         messageBuffer[20:24],
 		data:          messageBuffer[HeaderSize:],
 		headerBuffer:  messageBuffer[0:HeaderSize],
@@ -134,9 +142,9 @@ func CreateMessage() *AdbMessage {
 
 // DecodeMessage interprets an already-received, self-contained byte slice
 // (header + data, with no trailing bytes) as an AdbMessage, validating its
-// command, magic and data checksum. Unlike CreateMessage, it does not copy
-// the input: the returned message shares the given backing array, so the
-// caller must not reuse or mutate data while the message is in use.
+// command and magic. Unlike CreateMessage, it does not copy the input: the
+// returned message shares the given backing array, so the caller must not
+// reuse or mutate data while the message is in use.
 func DecodeMessage(data []byte) (*AdbMessage, error) {
 	if len(data) < HeaderSize {
 		return nil, ErrMessageTooShort
@@ -151,9 +159,6 @@ func DecodeMessage(data []byte) (*AdbMessage, error) {
 	dataLength := m.DataLength()
 	if HeaderSize+dataLength > uint32(len(data)) {
 		return nil, fmt.Errorf("declared data length %d exceeds the available buffer (%d bytes)", dataLength, len(data)-HeaderSize)
-	}
-	if err := validateData(m.data[:dataLength], m.DataCRC32()); err != nil {
-		return nil, err
 	}
 	return m, nil
 }
@@ -173,11 +178,13 @@ func (c *AdbMessage) Read(reader io.Reader) error {
 	if dataLength > MaxPayloadLength {
 		return fmt.Errorf("declared data length %d exceeds the maximum allowed payload length (%d)", dataLength, MaxPayloadLength)
 	}
+	// The data_check field is not validated: real adb clients only compute
+	// a real checksum for the initial CNXN and send a literal 0 for every
+	// message after that (protocol version A_VERSION_SKIP_CHECKSUM and
+	// above, which is effectively every adb build in current use), and
+	// they likewise do not validate what we send them.
 	_, err = io.ReadFull(reader, c.data[:dataLength])
 	if err != nil {
-		return err
-	}
-	if err := validateData(c.data[:dataLength], c.DataCRC32()); err != nil {
 		return err
 	}
 	return nil
@@ -196,7 +203,7 @@ func (c *AdbMessage) DumpParsed() string {
 	dumpBuilder.WriteString(fmt.Sprintf("%-*s %x\n", columnSize, "Arg1:", c.Arg1()))
 	dumpBuilder.WriteString(fmt.Sprintf("%-*s %x\n", columnSize, "Arg2:", c.Arg2()))
 	dumpBuilder.WriteString(fmt.Sprintf("%-*s %d\n", columnSize, "DataL:", c.DataLength()))
-	dumpBuilder.WriteString(fmt.Sprintf("%-*s %x\n", columnSize, "DataC:", c.DataCRC32()))
+	dumpBuilder.WriteString(fmt.Sprintf("%-*s %x\n", columnSize, "DataC:", c.DataChecksum()))
 	dumpBuilder.WriteString(fmt.Sprintf("%-*s %x\n", columnSize, "Magic:", c.Magic()))
 
 	if c.DataLength() > 0 {
@@ -215,7 +222,7 @@ func (c *AdbMessage) Set(command uint32, arg1 uint32, arg2 uint32, data []byte) 
 	binary.LittleEndian.PutUint32(c.arg1, arg1)
 	binary.LittleEndian.PutUint32(c.arg2, arg2)
 	binary.LittleEndian.PutUint32(c.dataLength, uint32(len(data)))
-	binary.LittleEndian.PutUint32(c.dataCRC32, crc32.ChecksumIEEE(data))
+	binary.LittleEndian.PutUint32(c.dataChecksum, checksum(data))
 	binary.LittleEndian.PutUint32(c.magic, command^magicConstant)
 	copy(c.data, data)
 	return nil

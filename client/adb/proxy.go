@@ -94,14 +94,14 @@ func (p *AdbProxy) handleConnection(ctx context.Context, conn net.Conn, roomId s
 		return
 	}
 	protocolVersion := message.Arg1()
-	maxMessageSize := message.Arg2()
-	logger.Info(fmt.Sprintf("Protocol version: %d, max message size: %d", protocolVersion, maxMessageSize))
-	if maxMessageSize > MaxPayloadLength {
-		logger.Error(fmt.Sprintf("The local ADB max message size is too large, max allowed message size: %d", MaxPayloadLength))
-		_ = conn.Close()
-		return
-	}
-	if err := message.Set(CommandConnect, protocolVersion, maxMessageSize, []byte(fmt.Sprintf("device:wrapper-remote-%s", roomId))); err != nil {
+	peerMaxMessageSize := message.Arg2()
+	logger.Info(fmt.Sprintf("Protocol version: %d, peer max message size: %d", protocolVersion, peerMaxMessageSize))
+	// Each side of a CNXN handshake independently advertises its own
+	// MAXDATA; there is no requirement that they match. We always
+	// advertise our own capacity here regardless of what the peer offered
+	// (real adb clients commonly offer up to 1MiB, far more than our
+	// fixed-size buffers hold).
+	if err := message.Set(CommandConnect, protocolVersion, MaxPayloadLength, []byte(fmt.Sprintf("device:wrapper-remote-%s", roomId))); err != nil {
 		logger.Error(fmt.Sprintf("Failed to build the CNXN response: %s", err))
 		_ = conn.Close()
 		return

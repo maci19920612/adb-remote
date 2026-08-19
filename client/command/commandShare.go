@@ -28,16 +28,25 @@ func CreateShareCommand(
 			if err := controller.Handshake(client); err != nil {
 				return err
 			}
-			return controller.JoinAsRoomOwner(context.Background(), client, smartSocket, *typedArgs.TargetDevice, controller.TTYAcceptPrompt)
+			acceptPrompt := controller.TTYAcceptPrompt
+			if *typedArgs.AutoAccept {
+				acceptPrompt = func(guestClientId string) (bool, error) {
+					fmt.Printf("Auto-accepting the room join request (clientId:%s)\n", guestClientId)
+					return true, nil
+				}
+			}
+			return controller.JoinAsRoomOwner(context.Background(), client, smartSocket, *typedArgs.TargetDevice, acceptPrompt)
 		},
 		ParameterFactory: func() (BaseCommand, error) {
 			flagSet := flag.NewFlagSet("share", flag.ExitOnError)
 			targetDevice := flagSet.String("targetDevice", "", "The target device ID what you want to share")
+			autoAccept := flagSet.Bool("yes", false, "Automatically accept every room join request instead of prompting on the TTY")
 			getHelp := flagSet.Bool("help", false, "Print this help")
 			return &commandShareArgs{
 				FlagSet:      flagSet,
 				GetHelp:      getHelp,
 				TargetDevice: targetDevice,
+				AutoAccept:   autoAccept,
 			}, nil
 		},
 
@@ -53,6 +62,7 @@ type commandShareArgs struct {
 	FlagSet      *flag.FlagSet
 	GetHelp      *bool
 	TargetDevice *string
+	AutoAccept   *bool
 }
 
 func (c *commandShareArgs) GetFlagSet() *flag.FlagSet {

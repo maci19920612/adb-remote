@@ -3,8 +3,52 @@ package adb
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"testing"
 )
+
+// realAdbCnxnHex is a genuine CNXN packet captured from a real, current-day
+// `adb connect` (platform-tools 35.0.0). It is here as a regression test:
+// an earlier version of this package validated the data_check field as a
+// real CRC32, which every real adb client fails, since the actual wire
+// protocol uses the sum of the payload bytes truncated to 32 bits.
+const realAdbCnxnHex = "434e584e01000001000010000501000047660000bcb1a7b1686f73743a3a66656174757265733d7368656c6c5f76322c636d642c737461745f76322c6c735f76322c66697865645f707573685f6d6b6469722c617065782c6162622c66697865645f707573685f73796d6c696e6b5f74696d657374616d702c6162625f657865632c72656d6f756e745f7368656c6c2c747261636b5f6170702c73656e64726563765f76322c73656e64726563765f76325f62726f746c692c73656e64726563765f76325f6c7a342c73656e64726563765f76325f7a7374642c73656e64726563765f76325f6472795f72756e5f73656e642c6f70656e73637265656e5f6d646e732c646576696365747261636b65725f70726f746f5f666f726d6174"
+
+func TestRealAdbCnxnPacketValidates(t *testing.T) {
+	raw, err := hex.DecodeString(realAdbCnxnHex)
+	if err != nil {
+		t.Fatalf("bad test fixture: %s", err)
+	}
+
+	m := CreateMessage()
+	if err := m.Read(bytes.NewReader(raw)); err != nil {
+		t.Fatalf("a real adb CNXN packet must be accepted, got: %s", err)
+	}
+	if m.Command() != CommandConnect {
+		t.Fatalf("expected command %x, got %x", CommandConnect, m.Command())
+	}
+	const realAdbProtocolVersionSkipChecksum = 0x01000001
+	if m.Arg1() != realAdbProtocolVersionSkipChecksum {
+		t.Fatalf("expected arg1 %x, got %x", realAdbProtocolVersionSkipChecksum, m.Arg1())
+	}
+	if m.Arg2() != 0x00100000 {
+		t.Fatalf("expected arg2 (peer maxdata) %x, got %x", 0x00100000, m.Arg2())
+	}
+	if got := m.DataString()[:len("host::features=")]; got != "host::features=" {
+		t.Fatalf("expected the data to start with %q, got %q", "host::features=", got)
+	}
+}
+
+func TestChecksumIsAdditiveByteSumNotCrc32(t *testing.T) {
+	data := []byte("host::features=shell_v2")
+	var want uint32
+	for _, b := range data {
+		want += uint32(b)
+	}
+	if got := checksum(data); got != want {
+		t.Fatalf("expected the additive byte-sum checksum %x, got %x", want, got)
+	}
+}
 
 func TestSetAndReadBackFields(t *testing.T) {
 	m := CreateMessage()
@@ -87,17 +131,23 @@ func TestReadRejectsBadMagic(t *testing.T) {
 	}
 }
 
-func TestReadRejectsCorruptedData(t *testing.T) {
+// TestReadDoesNotValidateDataChecksum documents a deliberate compatibility
+// choice: real adb clients only compute a real data_check for the initial
+// CNXN and send a literal 0 afterward (see checksum's doc comment), and do
+// not validate what we send them either. Rejecting on a checksum mismatch
+// would make this proxy unusable against every current adb build, so Read
+// must accept a message whose declared checksum does not match its data.
+func TestReadDoesNotValidateDataChecksum(t *testing.T) {
 	m := CreateMessage()
 	if err := m.Set(CommandWrite, 0, 0, []byte("payload")); err != nil {
 		t.Fatalf("Set failed: %s", err)
 	}
 	raw := append([]byte{}, m.Bytes()...)
-	raw[HeaderSize] ^= 0xFF // flip a byte inside the data region
+	raw[HeaderSize] ^= 0xFF // flip a byte inside the data region, checksum now stale
 
 	received := CreateMessage()
-	if err := received.Read(bytes.NewReader(raw)); err == nil {
-		t.Fatalf("expected a crc32 mismatch error for corrupted data")
+	if err := received.Read(bytes.NewReader(raw)); err != nil {
+		t.Fatalf("Read should not fail on a stale/mismatched checksum, got: %s", err)
 	}
 }
 
