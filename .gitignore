@@ -5,6 +5,9 @@
 
 # Logs
 *.log
+*.pcap
+/logs/
+**/logs/
 
 # Generated transporter TLS identity (self-signed, created on first run)
 *.pem

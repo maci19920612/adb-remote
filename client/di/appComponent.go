@@ -29,10 +29,26 @@ func CreateContainer() *container.Container {
 // logFilePath is where client logs go. Both `share` and `connect` run a
 // full-screen TUI on stdout (see client/tui); a log line writing straight
 // to stdout out-of-band would corrupt that rendering, so logs go to a file
-// instead. pcapFilePath sits next to it, written only when -verbosity=debug
-// enables packet capture (see transportLayer.Client.EnableDebugCapture).
-var logFilePath = filepath.Join(os.TempDir(), "adb-remote-client.log")
-var pcapFilePath = filepath.Join(os.TempDir(), "adb-remote-client.pcap")
+// instead, in a "logs" directory next to the executable. pcapFilePath sits
+// next to it, written only when -verbosity=debug enables packet capture
+// (see transportLayer.Client.EnableDebugCapture).
+var logFilePath = filepath.Join(logsDir(), "adb-remote-client.log")
+var pcapFilePath = filepath.Join(logsDir(), "adb-remote-client.pcap")
+
+// logsDir resolves to a "logs" directory next to the running executable,
+// creating it if needed. Falls back to the OS temp dir if the executable's
+// own path can't be resolved or the directory can't be created.
+func logsDir() string {
+	exePath, err := os.Executable()
+	if err != nil {
+		return os.TempDir()
+	}
+	dir := filepath.Join(filepath.Dir(exePath), "logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return os.TempDir()
+	}
+	return dir
+}
 
 // registerLogLevel provides the mutable *slog.LevelVar the logger is built
 // with. It starts at the zero value (slog.LevelInfo); ParseCommand raises
