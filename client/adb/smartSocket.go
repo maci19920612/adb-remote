@@ -1,7 +1,6 @@
 package adb
 
 import (
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -12,51 +11,63 @@ import (
 
 const DefaultAddress = "127.0.0.1:5037"
 const responseOkay = "OKAY"
-const responseFail = "FAIL"
 const smartSocketMessageFormat = "%04X%s"
+
+// maxSmartSocketResponseSize bounds a single smartsocket status response
+// body (e.g. a device list or an error message), not any ADB stream data —
+// stream bytes are relayed verbatim without going through this buffer.
+const maxSmartSocketResponseSize = 1024 * 1024
 
 type IAdbSmartSocket interface {
 	Connect(targetSerial string) error
+	Disconnect(targetSerial string) error
 	DeviceList() ([]Device, error)
-	Transport(targetSerial string) (*net.Conn, error)
+	// Transport returns a connection already inside "transport mode" for
+	// targetSerial. Real adb-server does not expose a raw ADB
+	// wire-protocol (CNXN/OPEN/WRTE/...) pass-through here: the connection
+	// still expects a second smartsocket-style service request next, which
+	// is what OpenStream sends. Transport is exposed mainly for tests and
+	// callers that want to issue their own service request.
+	Transport(targetSerial string) (net.Conn, error)
+	// OpenStream selects targetSerial and requests service (e.g.
+	// "shell,v2,raw:echo hi", "sync:") on a fresh connection, returning it
+	// positioned right after the OKAY/FAIL status, ready for the raw byte
+	// stream that service produces/consumes.
+	OpenStream(targetSerial string, service string) (net.Conn, error)
 }
 
 type AdbSmartSocket struct {
-	Address          string
-	messageBuffer    []byte
-	messageIntBuffer []byte
+	Address string
 
 	//Dependencies
 	logger *slog.Logger
 }
 
-func NewAdbSmartSocket() IAdbSmartSocket {
+func NewAdbSmartSocket(logger *slog.Logger) IAdbSmartSocket {
 	return &AdbSmartSocket{
-		Address:          DefaultAddress,
-		messageBuffer:    make([]byte, 1024*1024),
-		messageIntBuffer: make([]byte, 4),
+		Address: DefaultAddress,
+		logger:  logger,
 	}
 }
 
 func (ss *AdbSmartSocket) DeviceList() ([]Device, error) {
-	length, err := ss.executeCommand("host:devices")
+	body, err := ss.executeCommand("host:devices")
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println(hex.Dump(ss.messageBuffer[:length]))
 	deviceList := make([]Device, 0)
 	var lastIndex = 0
-	for lastIndex < length {
+	for lastIndex < len(body) {
 		deviceIdLastIndex := lastIndex
-		for deviceIdLastIndex < length && ss.messageBuffer[deviceIdLastIndex] != 0x09 {
+		for deviceIdLastIndex < len(body) && body[deviceIdLastIndex] != 0x09 {
 			deviceIdLastIndex++
 		}
 		deviceTypeLastIndex := deviceIdLastIndex + 1
-		for deviceTypeLastIndex < length && ss.messageBuffer[deviceTypeLastIndex] != 0x0a {
+		for deviceTypeLastIndex < len(body) && body[deviceTypeLastIndex] != 0x0a {
 			deviceTypeLastIndex++
 		}
-		deviceId := string(ss.messageBuffer[lastIndex:deviceIdLastIndex])
-		deviceType := string(ss.messageBuffer[deviceIdLastIndex+1 : deviceTypeLastIndex])
+		deviceId := string(body[lastIndex:deviceIdLastIndex])
+		deviceType := string(body[deviceIdLastIndex+1 : deviceTypeLastIndex])
 		deviceList = append(deviceList, Device{
 			Id:   deviceId,
 			Type: deviceType,
@@ -66,22 +77,46 @@ func (ss *AdbSmartSocket) DeviceList() ([]Device, error) {
 	return deviceList, nil
 }
 
-func (ss *AdbSmartSocket) Transport(targetSerial string) (*net.Conn, error) {
-	logger := ss.logger
+func (ss *AdbSmartSocket) Transport(targetSerial string) (net.Conn, error) {
 	conn, err := net.Dial("tcp", ss.Address)
 	if err != nil {
 		return nil, err
 	}
-	command := fmt.Sprintf("host:transport:%s", targetSerial)
-	length, err := conn.Write([]byte(fmt.Sprintf(smartSocketMessageFormat, len(command), command)))
-	logger.Info(fmt.Sprintf("Write return value: %d", length))
+	if err := ss.selectTransport(conn, targetSerial); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (ss *AdbSmartSocket) OpenStream(targetSerial string, service string) (net.Conn, error) {
+	conn, err := net.Dial("tcp", ss.Address)
 	if err != nil {
 		return nil, err
 	}
-	if err := ss.checkResult(&conn); err != nil {
+	if err := ss.selectTransport(conn, targetSerial); err != nil {
+		_ = conn.Close()
 		return nil, err
 	}
-	return &conn, nil
+	if err := ss.sendCommand(conn, service); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if err := ss.checkResult(conn); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func (ss *AdbSmartSocket) selectTransport(conn net.Conn, targetSerial string) error {
+	logger := ss.logger
+	command := fmt.Sprintf("host:transport:%s", targetSerial)
+	if err := ss.sendCommand(conn, command); err != nil {
+		return err
+	}
+	logger.Info(fmt.Sprintf("Selected transport for %s", targetSerial))
+	return ss.checkResult(conn)
 }
 
 func (ss *AdbSmartSocket) Connect(targetSerial string) error {
@@ -92,80 +127,72 @@ func (ss *AdbSmartSocket) Connect(targetSerial string) error {
 	return err
 }
 
-func (ss *AdbSmartSocket) executeCommand(command string) (int, error) {
+func (ss *AdbSmartSocket) Disconnect(targetSerial string) error {
+	logger := ss.logger
+	logger.Info(fmt.Sprintf("Disconnect called with targetSerial: %s", targetSerial))
+	command := fmt.Sprintf("host:disconnect:%s", targetSerial)
+	_, err := ss.executeCommand(command)
+	return err
+}
+
+func (ss *AdbSmartSocket) sendCommand(conn net.Conn, command string) error {
+	_, err := conn.Write([]byte(fmt.Sprintf(smartSocketMessageFormat, len(command), command)))
+	return err
+}
+
+func (ss *AdbSmartSocket) executeCommand(command string) ([]byte, error) {
 	logger := ss.logger
 	logger.Info(fmt.Sprintf("Execute command: %s", command))
 	conn, err := net.Dial("tcp", ss.Address)
+	if err != nil {
+		return nil, err
+	}
 	defer conn.Close()
-	if err != nil {
-		return 0, err
+	if err := ss.sendCommand(conn, command); err != nil {
+		return nil, err
 	}
-	commandLength := len(command)
-	conn.Write([]byte(fmt.Sprintf(smartSocketMessageFormat, commandLength, command)))
-	if err := ss.checkResult(&conn); err != nil {
-		return 0, err
+	if err := ss.checkResult(conn); err != nil {
+		return nil, err
 	}
-	length, err := ss.readResponse(&conn)
-	if err != nil {
-		return 0, err
-	}
-	return length, nil
+	return ss.readResponse(conn)
 }
 
-func (ss *AdbSmartSocket) checkResult(connection *net.Conn) error {
+func (ss *AdbSmartSocket) checkResult(connection net.Conn) error {
 	logger := ss.logger
 
-	length, err := (*connection).Read(ss.messageIntBuffer)
-	if err != nil && err != io.EOF {
+	statusBuffer := make([]byte, 4)
+	if _, err := io.ReadFull(connection, statusBuffer); err != nil {
 		return err
 	}
-	if err := ensureBufferFull(&ss.messageIntBuffer, length); err != nil {
-		return err
-	}
-	resultString := string(ss.messageIntBuffer)
+	resultString := string(statusBuffer)
 	logger.Info(fmt.Sprintf("Check result called: %s", resultString))
 	if resultString == responseOkay {
 		return nil
 	}
-	length, err = ss.readResponse(connection)
+	body, err := ss.readResponse(connection)
 	if err != nil {
 		return err
 	}
-	return fmt.Errorf("Error: %s", string(ss.messageBuffer[:length]))
+	return errors.New(string(body))
 }
 
-func (ss *AdbSmartSocket) readResponse(connection *net.Conn) (int, error) {
+func (ss *AdbSmartSocket) readResponse(connection net.Conn) ([]byte, error) {
 	logger := ss.logger
-	length, err := (*connection).Read(ss.messageIntBuffer)
-	if err != nil && err != io.EOF {
-		return 0, err
+	lengthBuffer := make([]byte, 4)
+	if _, err := io.ReadFull(connection, lengthBuffer); err != nil {
+		return nil, err
 	}
-	if err := ensureBufferFull(&ss.messageIntBuffer, length); err != nil {
-		return 0, err
-	}
-	responseLength, err := strconv.ParseInt(string(ss.messageIntBuffer), 16, 0)
-	logger.Info(fmt.Sprintf("Response length: %d", responseLength))
+	responseLength, err := strconv.ParseInt(string(lengthBuffer), 16, 0)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	logger.Info(fmt.Sprintf("Response length: %d", responseLength))
-	if int(responseLength) > len(ss.messageBuffer) {
-		return 0, errors.New("invalid response length, the target buffer too small to handle the responses")
+	if responseLength > maxSmartSocketResponseSize {
+		return nil, fmt.Errorf("response length %d exceeds the maximum allowed size (%d)", responseLength, maxSmartSocketResponseSize)
 	}
-	responseContainer := ss.messageBuffer[:responseLength]
-	length, err = (*connection).Read(responseContainer)
-	if err != nil && err != io.EOF {
-		return 0, err
+	body := make([]byte, responseLength)
+	if _, err := io.ReadFull(connection, body); err != nil {
+		return nil, err
 	}
-	if err := ensureBufferFull(&responseContainer, length); err != nil {
-		return 0, err
-	}
-	return length, nil
-}
-
-func ensureBufferFull(self *[]byte, actual int) error {
-	if len(*self) != actual {
-		return fmt.Errorf("invalid buffer boundary, expected %d, actual: %d", len(*self), actual)
-	}
-	return nil
+	return body, nil
 }

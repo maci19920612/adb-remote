@@ -1,34 +1,41 @@
 package controller
 
 import (
+	"adb-remote.maci.team/client/relay"
 	"adb-remote.maci.team/client/transportLayer"
 	"fmt"
 )
 
-func Handshake(client *transportLayer.Client) {
+// Handshake performs the initial protocol handshake with the transporter
+// and returns the client id assigned to this session. Presentation (e.g.
+// telling the user to share it with the room owner) is the caller's
+// responsibility.
+func Handshake(client *transportLayer.Client) (string, error) {
 	logger := client.Logger
-	mPool := client.TransporterMessagePool
 
 	logger.Info("Handshake started")
-	err := client.SendConnect()
-	if err != nil {
-		panic(err)
+	if err := client.SendConnect(); err != nil {
+		return "", err
 	}
-	message := <-client.MessageChannel
-	defer mPool.Release(message)
+	container, ok := <-client.Messages()
+	if !ok {
+		return "", relay.ErrTransportClosed
+	}
+	defer container.Dispose()
+	message, err := container.Data()
+	if err != nil {
+		return "", err
+	}
 	if message.IsError() {
 		payload, err := message.GetErrorPayload()
 		if err != nil {
-			panic(err)
-		} else {
-			panic(fmt.Errorf("connect error: %x -- %s", payload.ErrorCode, payload.ErrorMessage))
+			return "", err
 		}
+		return "", fmt.Errorf("connect error: %x -- %s", payload.ErrorCode, payload.ErrorMessage)
 	}
 	payload, err := message.GetPayloadConnectResponse()
 	if err != nil {
-		panic(err)
+		return "", err
 	}
-	fmt.Printf("You have to transfer your client ID in a separate channel to the room owne\nr")
-	fmt.Printf("Your client id: %s", payload.ClientId)
-
+	return payload.ClientId, nil
 }

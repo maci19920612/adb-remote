@@ -21,192 +21,256 @@ type RoomManager struct {
 	logger            *slog.Logger
 
 	//Internal state
-	rooms        []*roomData
-	ctx          *context.Context
-	cancelSignal context.CancelFunc
+	rooms      []*roomData
+	cancelFunc context.CancelFunc
 }
 
 func CreateRoomManager(cm *connectionManager.ConnectionManager, logger *slog.Logger) *RoomManager {
 	logger.Info("Create room manager")
-	ctx, cancelSignal := context.WithCancel(context.Background())
+	ctx, cancelFunc := context.WithCancel(context.Background())
 	roomManager := &RoomManager{
 		connectionManager: cm,
 		logger:            logger,
 		rooms:             make([]*roomData, 0, 10),
-		ctx:               &ctx,
-		cancelSignal:      cancelSignal,
+		cancelFunc:        cancelFunc,
 	}
 
-	go func() {
-		for {
-			select {
-			case client := <-cm.ClientDisconnectedChannel:
-				logger.Info(fmt.Sprintf("RoomManager: Client disconnected: %p", client))
-				roomManager.handleClientDisconnected(client)
-			case messageContainer := <-cm.ClientMessageChannel:
-				logger.Info(fmt.Sprintf("RoomManager: %X message received from client: %p", messageContainer.Message.Command(), messageContainer.Sender))
-				switch messageContainer.Message.Command() {
-				case protocol.CommandCreateRoom:
-					roomManager.handleCreateRoom(messageContainer.Sender)
-				case protocol.CommandJoinRoom:
-					payload, err := messageContainer.Message.GetPayloadConnectRoom()
-					if err != nil {
-						err = messageContainer.Sender.SendInvalidPayloadError(messageContainer.Message.Command())
-						if err != nil {
-							_ = messageContainer.Sender.Close()
-						}
-					} else {
-						roomManager.handleJoinRoom(messageContainer.Sender, payload.RoomId)
-					}
-				case protocol.CommandJoinRoom | protocol.CommandResponseMask:
-					payload, err := messageContainer.Message.GetPayloadConnectRoomResponse()
-					if err != nil {
-						logger.Info(fmt.Sprintf("Invalid message payload: %s", err))
-						err = messageContainer.Sender.SendInvalidPayloadError(messageContainer.Message.Command())
-						if err != nil {
-							_ = messageContainer.Sender.Close()
-						}
-					} else {
-						roomManager.handleJoinRoomResponse(messageContainer.Sender, payload.Accepted)
-					}
-				}
-
-			}
-		}
-	}()
+	go roomManager.run(ctx)
 
 	return roomManager
 }
 
+// Stop ends the room manager's dispatch loop.
+func (rm *RoomManager) Stop() {
+	rm.cancelFunc()
+}
+
+func (rm *RoomManager) run(ctx context.Context) {
+	logger := rm.logger
+	cm := rm.connectionManager
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case client := <-cm.ClientDisconnectedChannel:
+			logger.Info(fmt.Sprintf("RoomManager: Client disconnected: %p", client))
+			rm.handleClientDisconnected(client)
+		case messageContainer := <-cm.ClientMessageChannel:
+			rm.dispatchMessageSafely(messageContainer)
+		}
+	}
+}
+
+// dispatchMessageSafely wraps dispatchMessage with a recover. dispatchMessage
+// (and the payload parsing it triggers) runs on this single goroutine shared
+// across every room and client in the process, so a panic triggered by one
+// malformed message from one client — a parsing bug, not necessarily this
+// specific one — would otherwise crash the transporter for everyone instead
+// of just that one client's connection.
+func (rm *RoomManager) dispatchMessageSafely(messageContainer *connectionManager.ClientMessageContainer) {
+	defer func() {
+		if r := recover(); r != nil {
+			sender := messageContainer.Sender
+			rm.logger.Error(fmt.Sprintf("RoomManager: recovered from a panic handling a message from %p (%s), closing the connection: %v", sender, sender.GetClientId(), r))
+			_ = sender.Close()
+		}
+	}()
+	rm.dispatchMessage(messageContainer)
+}
+
+func (rm *RoomManager) dispatchMessage(messageContainer *connectionManager.ClientMessageContainer) {
+	logger := rm.logger
+	defer func() { _ = messageContainer.Message.Dispose() }()
+
+	message, err := messageContainer.Message.Data()
+	if err != nil {
+		logger.Error(fmt.Sprintf("RoomManager: Unusable pooled message container: %s", err))
+		return
+	}
+
+	sender := messageContainer.Sender
+	logger.Info(fmt.Sprintf("RoomManager: %x message received from client: %p", message.Command(), sender))
+	switch message.Command() {
+	case protocol.CommandCreateRoom:
+		rm.handleCreateRoom(sender)
+	case protocol.CommandJoinRoom:
+		payload, err := message.GetPayloadConnectRoom()
+		if err != nil {
+			if err := sender.SendInvalidPayloadError(message.Command()); err != nil {
+				_ = sender.Close()
+			}
+			return
+		}
+		rm.handleJoinRoom(sender, payload.RoomId, payload.PublicKey)
+	case protocol.CommandJoinRoom | protocol.CommandResponseMask:
+		payload, err := message.GetPayloadConnectRoomResponse()
+		if err != nil {
+			logger.Info(fmt.Sprintf("Invalid message payload: %s", err))
+			if err := sender.SendInvalidPayloadError(message.Command()); err != nil {
+				_ = sender.Close()
+			}
+			return
+		}
+		rm.handleJoinRoomResponse(sender, payload.Accepted, payload.PublicKey)
+	case protocol.CommandAdbTransport:
+		rm.handleAdbTransport(sender, message)
+	default:
+		logger.Warn(fmt.Sprintf("RoomManager: Unhandled command from client %p: %x", sender, message.Command()))
+	}
+}
+
 func (rm *RoomManager) handleCreateRoom(sender *connectionManager.ClientConnection) {
-	//TODO: Mutex needed here
 	logger := rm.logger
 	logger.Info(fmt.Sprintf("%p (%s): Create room request", sender, sender.GetClientId()))
-	if checkClientAlreadyInARoom(rm, sender) {
-		logger.Error(fmt.Sprintf("%p (%s): Client already present in a roomData, a client can't occupy more than 1 roomData", sender, sender.GetClientId()))
-		err := sender.SendErrorResponse(protocol.CommandCreateRoom, protocol.ErrorAlreadyInRoom, "You are already occupy a roomData")
-		if err != nil {
-			logger.Error(fmt.Sprintf("%p (%s): Client error during the error response sending, close the client connection", sender, sender.GetClientId()))
+	if rm.isClientInARoom(sender) {
+		logger.Error(fmt.Sprintf("%p (%s): Client already present in a room, a client can't occupy more than 1 room", sender, sender.GetClientId()))
+		if err := sender.SendErrorResponse(protocol.CommandCreateRoom, protocol.ErrorAlreadyInRoom, "You already occupy a room"); err != nil {
+			logger.Error(fmt.Sprintf("%p (%s): Error during the error response sending, close the client connection", sender, sender.GetClientId()))
 			_ = sender.Close()
 		}
 		return
 	}
 	roomId := utils.GenerateClientId()
-	logger.Info("%p (%s): Room ID generated: %s", sender, sender.GetClientId(), roomId)
+	logger.Info(fmt.Sprintf("%p (%s): Room ID generated: %s", sender, sender.GetClientId(), roomId))
 	rd := &roomData{
 		owner:  sender,
 		guest:  nil,
 		roomId: roomId,
 	}
 	rm.rooms = append(rm.rooms, rd)
-	err := sender.SendRoomCreateResponse(roomId)
-	if err != nil {
-		logger.Error("%p (%s): Error during the room creation response sending: %s", sender, sender.GetClientId(), err)
+	if err := sender.SendRoomCreateResponse(roomId); err != nil {
+		logger.Error(fmt.Sprintf("%p (%s): Error during the room creation response sending: %s", sender, sender.GetClientId(), err))
 		_ = sender.Close()
 		return
 	}
-	logger.Info("%p (%s): Room created: %s", sender, sender.GetClientId(), roomId)
+	logger.Info(fmt.Sprintf("%p (%s): Room created: %s", sender, sender.GetClientId(), roomId))
 }
 
-func (rm *RoomManager) handleJoinRoom(sender *connectionManager.ClientConnection, roomId string) {
-	//TODO: Mutex needed here
+func (rm *RoomManager) handleJoinRoom(sender *connectionManager.ClientConnection, roomId string, guestPublicKey []byte) {
 	logger := rm.logger
-	logger.Info("%p (%s): Join room request")
-	targetRoomIndex := -1
-	for index, room := range rm.rooms {
-		if room.roomId == roomId {
-			targetRoomIndex = index
-		}
-	}
-	if targetRoomIndex == -1 {
-		logger.Error("%p (%s): Client can't connect to the room %s: The room does not exists", sender, sender.GetClientId(), roomId)
-		err := sender.SendErrorResponse(
+	logger.Info(fmt.Sprintf("%p (%s): Join room request: %s", sender, sender.GetClientId(), roomId))
+
+	targetRoom := rm.findRoomById(roomId)
+	if targetRoom == nil {
+		logger.Error(fmt.Sprintf("%p (%s): Client can't connect to the room %s: The room does not exist", sender, sender.GetClientId(), roomId))
+		if err := sender.SendErrorResponse(
 			protocol.CommandJoinRoom,
 			protocol.ErrorRoomNotFound,
 			fmt.Sprintf("Room not found with this id: %s", roomId),
-		)
-		if err != nil {
-			logger.Error("%p (%s): Error during the error response sending: %s", sender, sender.GetClientId(), err)
+		); err != nil {
+			logger.Error(fmt.Sprintf("%p (%s): Error during the error response sending: %s", sender, sender.GetClientId(), err))
 			_ = sender.Close()
-			return
 		}
 		return
 	}
-	targetRoom := rm.rooms[targetRoomIndex]
+
+	if targetRoom.guest != nil {
+		logger.Error(fmt.Sprintf("%p (%s): Client can't join room %s: it already has a guest", sender, sender.GetClientId(), roomId))
+		if err := sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorFull, "This room already has a guest; only one guest is allowed per room"); err != nil {
+			logger.Error(fmt.Sprintf("%p (%s): Error during the error response sending: %s", sender, sender.GetClientId(), err))
+			_ = sender.Close()
+		}
+		return
+	}
+
 	targetRoom.guest = sender
 	owner := targetRoom.owner
-	err := owner.SendJoinRoomRequest(roomId, sender.GetClientId())
-	if err != nil {
-		logger.Error("%p (%s): Error during the send join room request sending to the room owner: %s", owner, owner.GetClientId(), err)
-		err := sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorUnknown, "Couldn't send the join request to the room owner, closing down the room")
-		if err != nil {
-			logger.Error("%p (%s): SendError", sender, sender.GetClientId())
+	if err := owner.SendJoinRoomRequest(roomId, sender.GetClientId(), guestPublicKey); err != nil {
+		logger.Error(fmt.Sprintf("%p (%s): Error during the join room request sending to the room owner: %s", owner, owner.GetClientId(), err))
+		if err := sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorUnknown, "Couldn't send the join request to the room owner, closing down the room"); err != nil {
+			logger.Error(fmt.Sprintf("%p (%s): Error sending the failure notice to the guest: %s", sender, sender.GetClientId(), err))
 		}
 		rm.closeRoom(targetRoom)
 	}
 }
 
-func (rm *RoomManager) handleJoinRoomResponse(sender *connectionManager.ClientConnection, isAccepted int) {
+func (rm *RoomManager) handleJoinRoomResponse(sender *connectionManager.ClientConnection, isAccepted int, ownerPublicKey []byte) {
 	logger := rm.logger
-	logger.Info("%p (%s): Handle join room response", sender, sender.GetClientId())
-	var targetRoom *roomData = nil
-	for _, room := range rm.rooms {
-		if room.owner == sender {
-			targetRoom = room
-		}
-	}
+	logger.Info(fmt.Sprintf("%p (%s): Handle join room response", sender, sender.GetClientId()))
+
+	targetRoom := rm.findRoomByOwner(sender)
 	if targetRoom == nil {
-		logger.Error("%p (%s): Room not found by owner", sender, sender.GetClientId())
-		err := sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorRoomNotFound, fmt.Sprintf("No room found where the sender is the owner"))
-		if err != nil {
+		logger.Error(fmt.Sprintf("%p (%s): Room not found by owner", sender, sender.GetClientId()))
+		if err := sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorRoomNotFound, "No room found where the sender is the owner"); err != nil {
 			_ = sender.Close()
-			logger.Error("%p (%s): Error during the error response sending: %s", sender, sender.GetClientId(), err)
+			logger.Error(fmt.Sprintf("%p (%s): Error during the error response sending: %s", sender, sender.GetClientId(), err))
 		}
 		return
 	}
 
 	if targetRoom.guest == nil {
-		logger.Error("%p (%s): Room was empty", sender, sender.GetClientId())
-		err := sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorNoParticipant, fmt.Sprintf("You are in an empty room"))
-		if err != nil {
-			logger.Error("%p (%s): Error during the error response sending %s", sender, sender.GetClientId(), err)
+		logger.Error(fmt.Sprintf("%p (%s): Room was empty", sender, sender.GetClientId()))
+		if err := sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorNoParticipant, "You are in an empty room"); err != nil {
+			logger.Error(fmt.Sprintf("%p (%s): Error during the error response sending: %s", sender, sender.GetClientId(), err))
 			rm.closeRoom(targetRoom)
 		}
 		return
 	}
-	err := targetRoom.guest.SendJoinRoomResponse(isAccepted)
-	if err != nil {
-		logger.Error("%p (%s): Error during the response sending to the guest", sender, sender.GetClientId())
+
+	if err := targetRoom.guest.SendJoinRoomResponse(isAccepted, sender.GetClientId(), ownerPublicKey); err != nil {
+		logger.Error(fmt.Sprintf("%p (%s): Error during the response sending to the guest", sender, sender.GetClientId()))
 		_ = targetRoom.guest.Close()
 		targetRoom.guest = nil
 
-		err = sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorNoParticipant, "participant disconnected during the response sending, the room is waiting for an another participant")
-		if err != nil {
+		if err := sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorNoParticipant, "participant disconnected during the response sending, the room is waiting for another participant"); err != nil {
 			rm.closeRoom(targetRoom)
 		}
+		return
 	}
 
-	logger.Info("%p (%s): The room is ready to transport the ADB messages in the room")
+	if isAccepted == 0 {
+		logger.Info(fmt.Sprintf("%p (%s): Join room request declined, evicting the guest", sender, sender.GetClientId()))
+		targetRoom.guest = nil
+		return
+	}
+
+	logger.Info(fmt.Sprintf("%p (%s): The room %s is ready to relay ADB messages", sender, sender.GetClientId(), targetRoom.roomId))
 }
 
-func (rm *RoomManager) closeRoom(roomData *roomData) {
+// handleAdbTransport forwards an opaque ADB transport message from the
+// sender to the other participant in the sender's room. The transporter
+// never inspects the embedded ADB payload; it only routes it.
+func (rm *RoomManager) handleAdbTransport(sender *connectionManager.ClientConnection, message *protocol.TransporterMessage) {
 	logger := rm.logger
-	logger.Info("%p (%s): Room closed", roomData, roomData.roomId)
-	owner := roomData.owner
-	guest := roomData.guest
-	if owner != nil {
-		logger.Info("%p (%s): Disconnect from client due to room close", owner, owner.GetClientId())
-		_ = owner.Close()
+	targetRoom := rm.findRoomByParticipant(sender)
+	if targetRoom == nil {
+		logger.Warn(fmt.Sprintf("%p (%s): Received an ADB transport message outside of any room", sender, sender.GetClientId()))
+		return
 	}
-	if guest != nil {
-		logger.Info("%p (%s): Disconnect from client due to room close", guest, guest.GetClientId())
-		_ = guest.Close()
+
+	var target *connectionManager.ClientConnection
+	if targetRoom.owner == sender {
+		target = targetRoom.guest
+	} else {
+		target = targetRoom.owner
+	}
+	if target == nil {
+		logger.Warn(fmt.Sprintf("%p (%s): Received an ADB transport message but the room has no other participant", sender, sender.GetClientId()))
+		return
+	}
+
+	if err := target.Send(message); err != nil {
+		logger.Error(fmt.Sprintf("%p (%s): Failed to forward the ADB transport message: %s", sender, sender.GetClientId(), err))
+	}
+}
+
+func (rm *RoomManager) closeRoom(room *roomData) {
+	logger := rm.logger
+	logger.Info(fmt.Sprintf("Room closed: %s", room.roomId))
+	if room.owner != nil {
+		logger.Info(fmt.Sprintf("%p (%s): Disconnecting client due to room close", room.owner, room.owner.GetClientId()))
+		_ = room.owner.Close()
+	}
+	if room.guest != nil {
+		logger.Info(fmt.Sprintf("%p (%s): Disconnecting client due to room close", room.guest, room.guest.GetClientId()))
+		_ = room.guest.Close()
 	}
 
 	targetIndex := -1
-	for index, roomDataItem := range rm.rooms {
-		if roomDataItem == roomData {
+	for index, candidate := range rm.rooms {
+		if candidate == room {
 			targetIndex = index
+			break
 		}
 	}
 	if targetIndex >= 0 {
@@ -214,41 +278,58 @@ func (rm *RoomManager) closeRoom(roomData *roomData) {
 	} else {
 		logger.Warn("Room not found in the room manager")
 	}
-	logger.Info("%p (%s): Room deleted", roomData, roomData.roomId)
+	logger.Info(fmt.Sprintf("Room deleted: %s", room.roomId))
 }
 
-func checkClientAlreadyInARoom(roomManager *RoomManager, connection *connectionManager.ClientConnection) bool {
-	for _, rm := range (*roomManager).rooms {
-		if rm.guest == connection || rm.owner == connection {
-			return true
+func (rm *RoomManager) isClientInARoom(connection *connectionManager.ClientConnection) bool {
+	return rm.findRoomByParticipant(connection) != nil
+}
+
+func (rm *RoomManager) findRoomById(roomId string) *roomData {
+	for _, room := range rm.rooms {
+		if room.roomId == roomId {
+			return room
 		}
 	}
-	return false
+	return nil
+}
+
+func (rm *RoomManager) findRoomByOwner(connection *connectionManager.ClientConnection) *roomData {
+	for _, room := range rm.rooms {
+		if room.owner == connection {
+			return room
+		}
+	}
+	return nil
+}
+
+func (rm *RoomManager) findRoomByParticipant(connection *connectionManager.ClientConnection) *roomData {
+	for _, room := range rm.rooms {
+		if room.owner == connection || room.guest == connection {
+			return room
+		}
+	}
+	return nil
 }
 
 func (rm *RoomManager) handleClientDisconnected(client *connectionManager.ClientConnection) {
 	logger := rm.logger
 	logger.Info(fmt.Sprintf("Client disconnected: %p", client))
 
-	var targetRoom *roomData = nil
-	for _, room := range rm.rooms {
-		if room.owner == client {
-			targetRoom = room
-		} else if room.guest == client {
-			targetRoom = room
-		}
-	}
-
+	targetRoom := rm.findRoomByParticipant(client)
 	if targetRoom == nil {
 		logger.Info(fmt.Sprintf("The disconnected client did not join a room: %p", client))
 		return
 	}
 	if targetRoom.owner == client {
-		logger.Info(fmt.Sprintf("The disconnected client was the room (%s) owner, close the room: %p", targetRoom.roomId, client))
+		logger.Info(fmt.Sprintf("The disconnected client was the room (%s) owner, closing the room: %p", targetRoom.roomId, client))
 		rm.closeRoom(targetRoom)
 	} else if targetRoom.guest == client {
-		logger.Info(fmt.Sprintf("The disconnected client was the room (%s) guest, clear the room: %p", targetRoom.roomId, client))
+		logger.Info(fmt.Sprintf("The disconnected client was the room (%s) guest, clearing the room: %p", targetRoom.roomId, client))
 		_ = targetRoom.guest.Close()
 		targetRoom.guest = nil
+		if err := targetRoom.owner.SendGuestLeft(); err != nil {
+			logger.Error(fmt.Sprintf("%p (%s): Failed to notify the owner that the guest left: %s", targetRoom.owner, targetRoom.owner.GetClientId(), err))
+		}
 	}
 }

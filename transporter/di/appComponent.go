@@ -24,12 +24,7 @@ func CreateContainer() container.Container {
 
 func registerLogger(container *container.Container) {
 	err := container.Singleton(func() *slog.Logger {
-		//handlerOptions := &slog.HandlerOptions{
-		//	AddSource: false,
-		//}
-		//handler := slog.New(&prettyLogHandler.Handler{})
-		//handler := slog.NewTextHandler(os.Stdout, handlerOptions)
-		return slog.New(prettyLogHandler.CreatePrettyHandler(&slog.HandlerOptions{}))
+		return slog.New(prettyLogHandler.CreatePrettyHandler(os.Stdout, &slog.HandlerOptions{}))
 	})
 	if err != nil {
 		panic(err)
@@ -42,7 +37,10 @@ func registerConfiguration(container *container.Container) {
 		panic(err)
 	}
 
-	configInstance := config.CreateConfig(path.Join(workingDirectory, ConfigFileName))
+	configInstance, err := config.CreateConfig(path.Join(workingDirectory, ConfigFileName))
+	if err != nil {
+		panic(err)
+	}
 	err = container.Singleton(func() *config.TransporterConfiguration {
 		return configInstance
 	})

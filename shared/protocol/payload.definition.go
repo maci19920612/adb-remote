@@ -120,9 +120,17 @@ func (m *TransporterMessage) SetPayloadCreateRoomResponse(data *TransporterMessa
 //endregion
 
 // region Connect to room payload
+
+// TransporterMessagePayloadConnectRoom carries a join request in both
+// directions: the guest sends {RoomId, PublicKey} to the transporter, which
+// forwards {RoomId, ClientId, PublicKey} to the room owner once it knows
+// which guest sent it. PublicKey is the guest's identity public key (see
+// client/identity); the owner displays its fingerprint so the operator can
+// verify the guest's identity out of band before accepting.
 type TransporterMessagePayloadConnectRoom struct {
-	RoomId   string
-	ClientId string
+	RoomId    string
+	ClientId  string
+	PublicKey []byte
 }
 
 func (m *TransporterMessage) GetPayloadConnectRoom() (*TransporterMessagePayloadConnectRoom, error) {
@@ -130,10 +138,18 @@ func (m *TransporterMessage) GetPayloadConnectRoom() (*TransporterMessagePayload
 	if err != nil {
 		return nil, err
 	}
-	_, clientId, err := m.readString(offset)
+	offset, clientId, err := m.readString(offset)
+	if err != nil {
+		return nil, err
+	}
+	_, publicKey, err := m.readString(offset)
+	if err != nil {
+		return nil, err
+	}
 	return &TransporterMessagePayloadConnectRoom{
-		RoomId:   roomId,
-		ClientId: clientId,
+		RoomId:    roomId,
+		ClientId:  clientId,
+		PublicKey: []byte(publicKey),
 	}, nil
 }
 
@@ -142,7 +158,14 @@ func (m *TransporterMessage) SetPayloadConnectRoom(data *TransporterMessagePaylo
 	if err != nil {
 		return err
 	}
-	payloadLength, err := m.writeString(offset, data.ClientId)
+	offset, err = m.writeString(offset, data.ClientId)
+	if err != nil {
+		return err
+	}
+	payloadLength, err := m.writeString(offset, string(data.PublicKey))
+	if err != nil {
+		return err
+	}
 	m.updatePayloadMetadata(payloadLength)
 	return nil
 }
@@ -150,26 +173,74 @@ func (m *TransporterMessage) SetPayloadConnectRoom(data *TransporterMessagePaylo
 //endregion
 
 // region Connect to room response
+
+// TransporterMessagePayloadConnectRoomResult carries the owner's
+// accept/decline decision back to the guest. ClientId and PublicKey are the
+// room owner's identity (see client/identity): the client sets only
+// Accepted and PublicKey when sending this from the owner, and the
+// transporter fills in ClientId (which it already knows from the owner's
+// connection) before forwarding to the guest, mirroring how
+// TransporterMessagePayloadConnectRoom's ClientId is filled in for the
+// guest->owner direction. The guest displays the owner's fingerprint so the
+// operator can verify it out of band, symmetric with the owner verifying
+// the guest's.
 type TransporterMessagePayloadConnectRoomResult struct {
-	Accepted int //0 = false, anything else true
+	Accepted  int //0 = false, anything else true
+	ClientId  string
+	PublicKey []byte
 }
 
 func (m *TransporterMessage) GetPayloadConnectRoomResponse() (*TransporterMessagePayloadConnectRoomResult, error) {
-	_, accepted, err := m.readInt(0)
+	offset, accepted, err := m.readInt(0)
+	if err != nil {
+		return nil, err
+	}
+	offset, clientId, err := m.readString(offset)
+	if err != nil {
+		return nil, err
+	}
+	_, publicKey, err := m.readString(offset)
 	if err != nil {
 		return nil, err
 	}
 	return &TransporterMessagePayloadConnectRoomResult{
-		Accepted: accepted,
+		Accepted:  accepted,
+		ClientId:  clientId,
+		PublicKey: []byte(publicKey),
 	}, nil
 }
 
 func (m *TransporterMessage) SetPayloadConnectRoomResult(data *TransporterMessagePayloadConnectRoomResult) error {
-	payloadLength, err := m.writeInt(0, data.Accepted)
+	offset, err := m.writeInt(0, data.Accepted)
+	if err != nil {
+		return err
+	}
+	offset, err = m.writeString(offset, data.ClientId)
+	if err != nil {
+		return err
+	}
+	payloadLength, err := m.writeString(offset, string(data.PublicKey))
 	if err != nil {
 		return err
 	}
 	m.updatePayloadMetadata(payloadLength)
+	return nil
+}
+
+//endregion
+
+// region Raw payload
+
+// SetRawPayload copies an already-encoded, opaque byte slice into the
+// message's payload buffer, bypassing the typed payload accessors. Used to
+// forward or embed data (e.g. an ADB protocol message) whose framing is
+// owned by another layer.
+func (m *TransporterMessage) SetRawPayload(data []byte) error {
+	if uint32(len(data)) > uint32(len(m.payloadBuffer)) {
+		return fmt.Errorf("not enough space in the payload buffer, size: %d, data length: %d", len(m.payloadBuffer), len(data))
+	}
+	copy(m.payloadBuffer, data)
+	m.updatePayloadMetadata(uint32(len(data)))
 	return nil
 }
 
@@ -182,44 +253,59 @@ func (m *TransporterMessage) writeInt(offset uint32, value int) (uint32, error) 
 	if uint32(len(m.payloadBuffer)) < newOffset {
 		return 0, fmt.Errorf("not enough space in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), newOffset)
 	}
-	ByteOrder.PutUint32(m.payloadBuffer[offset:typeSize], uint32(value))
+	ByteOrder.PutUint32(m.payloadBuffer[offset:newOffset], uint32(value))
 	return newOffset, nil
 }
 
 func (m *TransporterMessage) writeString(offset uint32, value string) (uint32, error) {
 	lengthTypeSize := uint32(4)
 	valueBytes := []byte(value)
-	newOffset := offset + lengthTypeSize + uint32(len(valueBytes))
+	dataOffset := offset + lengthTypeSize
+	newOffset := dataOffset + uint32(len(valueBytes))
 	if uint32(len(m.payloadBuffer)) < newOffset {
 		return 0, fmt.Errorf("not enough space in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), newOffset)
 	}
-	ByteOrder.PutUint32(m.payloadBuffer[offset:lengthTypeSize], uint32(len(valueBytes)))
-	copy(m.payloadBuffer[offset+lengthTypeSize:], valueBytes)
+	ByteOrder.PutUint32(m.payloadBuffer[offset:dataOffset], uint32(len(valueBytes)))
+	copy(m.payloadBuffer[dataOffset:newOffset], valueBytes)
 	return newOffset, nil
 }
 
+// readInt and readString bound-check against the message's declared
+// PayloadLength (the extent actually populated by the last Read/SetRawPayload
+// call), not the raw payload buffer capacity. The buffer is pooled and
+// reused across messages, so anything beyond PayloadLength may be stale data
+// left over from a previous message; treating it as readable would silently
+// leak that stale content instead of failing.
 func (m *TransporterMessage) readInt(offset uint32) (uint32, int, error) {
 	typeSize := uint32(4)
-	if uint32(len(m.payloadBuffer)) < typeSize+offset {
-		return 0, 0, fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), typeSize+offset)
+	newOffset := offset + typeSize
+	if m.PayloadLength() < newOffset {
+		return 0, 0, fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", m.PayloadLength(), newOffset)
 	}
-	value := ByteOrder.Uint32(m.payloadBuffer[offset:typeSize])
-	return offset + typeSize, int(value), nil
+	value := ByteOrder.Uint32(m.payloadBuffer[offset:newOffset])
+	return newOffset, int(value), nil
 }
 
 func (m *TransporterMessage) readString(offset uint32) (uint32, string, error) {
 	lengthTypeSize := uint32(4)
-	newOffset := offset + lengthTypeSize
-	if uint32(len(m.payloadBuffer)) < newOffset {
-		return 0, "", fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), newOffset)
+	dataOffset := offset + lengthTypeSize
+	if m.PayloadLength() < dataOffset {
+		return 0, "", fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", m.PayloadLength(), dataOffset)
 	}
-	length := ByteOrder.Uint32(m.payloadBuffer[offset:lengthTypeSize])
-	newOffset += length
-	if uint32(len(m.payloadBuffer)) < newOffset {
-		return 0, "", fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", len(m.payloadBuffer), newOffset)
+	length := ByteOrder.Uint32(m.payloadBuffer[offset:dataOffset])
+	// length is attacker-controlled (read verbatim off the wire). Compare
+	// against the remaining payload instead of computing dataOffset+length
+	// directly: with dataOffset already bounded by PayloadLength() (checked
+	// above) and length otherwise unbounded, that addition can wrap a
+	// uint32 (e.g. length near 0xFFFFFFFF) and produce a newOffset that
+	// passes a naive "< PayloadLength()" check while landing below
+	// dataOffset, which then panics slicing payloadBuffer[dataOffset:newOffset].
+	remaining := m.PayloadLength() - dataOffset
+	if length > remaining {
+		return 0, "", fmt.Errorf("declared string length %d exceeds the remaining payload (%d bytes)", length, remaining)
 	}
-	offset += lengthTypeSize
-	value := string(m.payloadBuffer[offset : offset+length])
+	newOffset := dataOffset + length
+	value := string(m.payloadBuffer[dataOffset:newOffset])
 	return newOffset, value, nil
 }
 

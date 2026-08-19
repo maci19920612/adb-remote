@@ -4,25 +4,75 @@ import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/command"
 	"adb-remote.maci.team/client/config"
+	"adb-remote.maci.team/client/identity"
 	"adb-remote.maci.team/client/transportLayer"
 	"adb-remote.maci.team/shared/prettyLogHandler"
 	"github.com/golobby/container/v3"
+	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 )
 
 func CreateContainer() *container.Container {
 	cont := container.New()
+	registerLogLevel(&cont)
 	registerLogger(&cont)
 	registerConfig(&cont)
 	registerClient(&cont)
+	registerSmartSocket(&cont)
+	registerIdentity(&cont)
 	registerCommands(&cont)
-	registerAdbProxy(&cont)
 	return &cont
 }
 
+// logFilePath is where client logs go. Both `share` and `connect` run a
+// full-screen TUI on stdout (see client/tui); a log line writing straight
+// to stdout out-of-band would corrupt that rendering, so logs go to a file
+// instead, in a "logs" directory next to the executable. pcapFilePath sits
+// next to it, written only when -verbosity=debug enables packet capture
+// (see transportLayer.Client.EnableDebugCapture).
+var logFilePath = filepath.Join(logsDir(), "adb-remote-client.log")
+var pcapFilePath = filepath.Join(logsDir(), "adb-remote-client.pcap")
+
+// logsDir resolves to a "logs" directory next to the running executable,
+// creating it if needed. Falls back to the OS temp dir if the executable's
+// own path can't be resolved or the directory can't be created.
+func logsDir() string {
+	exePath, err := os.Executable()
+	if err != nil {
+		return os.TempDir()
+	}
+	dir := filepath.Join(filepath.Dir(exePath), "logs")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return os.TempDir()
+	}
+	return dir
+}
+
+// registerLogLevel provides the mutable *slog.LevelVar the logger is built
+// with. It starts at the zero value (slog.LevelInfo); ParseCommand raises
+// it to Debug once it has parsed a command's -verbosity flag, which is
+// necessarily after this container (and so the logger) already exists.
+func registerLogLevel(container *container.Container) {
+	err := container.Singleton(func() *slog.LevelVar {
+		return new(slog.LevelVar)
+	})
+	if err != nil {
+		panic(err)
+	}
+}
+
 func registerLogger(container *container.Container) {
-	err := container.Singleton(func() *slog.Logger {
-		return slog.New(prettyLogHandler.CreatePrettyHandler(&slog.HandlerOptions{}))
+	err := container.Singleton(func(logLevel *slog.LevelVar) *slog.Logger {
+		var writer io.Writer
+		logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			writer = io.Discard
+		} else {
+			writer = logFile
+		}
+		return slog.New(prettyLogHandler.CreatePrettyHandler(writer, &slog.HandlerOptions{Level: logLevel}))
 	})
 	if err != nil {
 		panic(err)
@@ -47,28 +97,45 @@ func registerClient(container *container.Container) {
 	}
 }
 
+func registerSmartSocket(container *container.Container) {
+	err := container.Singleton(func(logger *slog.Logger) adb.IAdbSmartSocket {
+		return adb.NewAdbSmartSocket(logger)
+	})
+	if err != nil {
+		panic(err)
+	}
+}
+
+// registerIdentity loads (generating on first run) this installation's
+// persistent identity keypair — see client/identity.
+func registerIdentity(container *container.Container) {
+	err := container.Singleton(func() (*identity.Identity, error) {
+		path, err := identity.DefaultPath()
+		if err != nil {
+			return nil, err
+		}
+		return identity.Load(path)
+	})
+	if err != nil {
+		panic(err)
+	}
+}
+
 func registerCommands(container *container.Container) {
-	err := container.Singleton(func(logger *slog.Logger, client *transportLayer.Client, config *config.ClientConfiguration) []*command.Command[command.BaseCommand] {
+	err := container.Singleton(func(
+		logger *slog.Logger,
+		client *transportLayer.Client,
+		smartSocket adb.IAdbSmartSocket,
+		clientIdentity *identity.Identity,
+		config *config.ClientConfiguration,
+		logLevel *slog.LevelVar,
+	) []*command.Command[command.BaseCommand] {
 		return []*command.Command[command.BaseCommand]{
-			command.CreateShareCommand(logger, client, config),
-			command.CreateConnectCommand(logger, client, config),
+			command.CreateShareCommand(logger, client, smartSocket, clientIdentity, config, logLevel, pcapFilePath),
+			command.CreateConnectCommand(logger, client, smartSocket, clientIdentity, config, logLevel, pcapFilePath),
 		}
 	})
 	if err != nil {
 		panic(err)
 	}
-}
-
-func registerAdbProxy(container *container.Container) {
-	err := container.Singleton(func(logger *slog.Logger, client *transportLayer.Client, config *config.ClientConfiguration) adb.IAdbProxy {
-		return adb.NewAdbProxy(config.TransporterAddress, logger, client)
-	})
-	if err != nil {
-		panic(err)
-	}
-}
-
-func registerAdbSmartSocket(container *container.Container) {
-	err := container.Singleton(func(logger *slog.Logger) {
-	})
 }

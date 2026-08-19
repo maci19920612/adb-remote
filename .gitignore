@@ -1,0 +1,13 @@
+# Build outputs
+/client/adb-remote-client
+/client/client
+/transporter/transporter
+
+# Logs
+*.log
+*.pcap
+/logs/
+**/logs/
+
+# Generated transporter TLS identity (self-signed, created on first run)
+*.pem

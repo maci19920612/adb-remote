@@ -3,193 +3,304 @@ package transportLayer
 import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/config"
-	"adb-remote.maci.team/shared"
+	"adb-remote.maci.team/client/pcapwriter"
 	"adb-remote.maci.team/shared/protocol"
+	"adb-remote.maci.team/shared/utils"
 	"context"
+	"crypto/tls"
 	"fmt"
-	"hash/crc32"
 	"log/slog"
 	"net"
+	"os"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 const messageChannelBufferSize = 0
 
+// MessageContainer is the pooled, disposable handle a caller receives for
+// every message read off the wire. The caller must call Dispose once done
+// reading it so the underlying buffer can be reused.
+type MessageContainer = utils.DisposableObjectContainer[protocol.TransporterMessage]
+
 type Client struct {
-	connection     *net.Conn
-	context        *context.Context
-	cancelFunc     *context.CancelFunc
-	MessageChannel chan *protocol.TransporterMessage
+	connection net.Conn
+	cancelFunc context.CancelFunc
+
+	// writeMutex serializes writes to connection. Owner-side stream
+	// multiplexing calls SendAdbMessage concurrently from one goroutine
+	// per open ADB stream; without this, two concurrent Write calls on the
+	// same net.Conn could interleave their bytes on the wire and corrupt
+	// the transporter protocol framing.
+	writeMutex sync.Mutex
+
+	messageChannel chan *MessageContainer
+
+	// bytesSent/bytesReceived count total wire bytes (header+payload) across
+	// every message, for the TUI's transfer-stats footer. Accessed
+	// concurrently from writeMessage (any sender goroutine) and startReader
+	// (the one reader goroutine).
+	bytesSent     atomic.Uint64
+	bytesReceived atomic.Uint64
+
+	// capture is non-nil only when debug packet capture is enabled (see
+	// EnableDebugCapture); nil-checked on every send/receive so the common
+	// case stays a single atomic load.
+	capture atomic.Pointer[packetCapture]
 
 	//Dependencies
-	TransporterMessagePool *shared.TransportMessagePool
+	transporterMessagePool *utils.ObjectPool[protocol.TransporterMessage]
 	Logger                 *slog.Logger
 	Config                 *config.ClientConfiguration
 }
 
 func CreateClient(logger *slog.Logger, config *config.ClientConfiguration) (*Client, error) {
-
+	factory := func() *protocol.TransporterMessage {
+		return protocol.CreateTransporterMessage()
+	}
 	client := &Client{
-		MessageChannel: make(chan *protocol.TransporterMessage, messageChannelBufferSize),
+		messageChannel: make(chan *MessageContainer, messageChannelBufferSize),
 
 		//Dependencies
-		TransporterMessagePool: shared.CreateTransporterMessagePool(),
+		transporterMessagePool: utils.NewObjectPool(factory),
 		Logger:                 logger,
 		Config:                 config,
 	}
 
 	return client, nil
 }
+
+// Messages yields every TransporterMessage read off the wire. The receiver
+// owns the returned container and must Dispose it once done.
+func (c *Client) Messages() <-chan *MessageContainer {
+	return c.messageChannel
+}
+
+// packetCapture bundles a pcap writer with the file it owns, so Close can
+// flush/close it.
+type packetCapture struct {
+	writer *pcapwriter.Writer
+	file   *os.File
+}
+
+// EnableDebugCapture starts recording every message this client sends and
+// receives to a pcap file at path (see client/pcapwriter for what "capture"
+// means here — the plaintext protocol traffic, not real packets off a
+// NIC). Meant for debug-verbosity logging; safe to call before or after
+// Start().
+func (c *Client) EnableDebugCapture(path string) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("failed to create the packet capture file: %w", err)
+	}
+	writer, err := pcapwriter.NewWriter(file)
+	if err != nil {
+		_ = file.Close()
+		return fmt.Errorf("failed to write the packet capture header: %w", err)
+	}
+	c.capture.Store(&packetCapture{writer: writer, file: file})
+	return nil
+}
+
+// recordCapture is a no-op unless EnableDebugCapture has been called.
+func (c *Client) recordCapture(direction pcapwriter.Direction, data []byte) {
+	capture := c.capture.Load()
+	if capture == nil {
+		return
+	}
+	if err := capture.writer.WritePacket(direction, data, time.Now()); err != nil {
+		c.Logger.Error(fmt.Sprintf("Failed to write a packet capture record: %s", err))
+	}
+}
+
+// Start dials the transporter over TLS. The transporter's certificate is
+// self-signed (see transporter/tlsutil) with no CA behind it, so this only
+// encrypts the connection against passive eavesdropping — it does not
+// authenticate the transporter, hence InsecureSkipVerify. Authenticating
+// who you're actually talking to end-to-end (the room owner/guest, not the
+// relay in between) is what client/identity's public-key fingerprints are
+// for, checked at the application layer during room join.
 func (c *Client) Start() error {
 	address := c.Config.TransporterAddress
-	connection, err := net.Dial("tcp", address)
+	connection, err := tls.Dial("tcp", address, &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
 		return err
 	}
 	ctx, cancelFunc := context.WithCancel(context.Background())
-	c.context = &ctx
-	c.cancelFunc = &cancelFunc
-	c.connection = &connection
-	go c.startReader()
+	c.cancelFunc = cancelFunc
+	c.connection = connection
+	go c.startReader(ctx)
 	return nil
 }
 
-func (c *Client) startReader() {
+// startReader is the sole sender on messageChannel, so it alone is
+// responsible for closing it once reading stops for any reason (read error,
+// a broken pool, or ctx cancellation) — this is how Messages() consumers
+// learn the connection is gone, rather than blocking forever.
+func (c *Client) startReader(ctx context.Context) {
 	log := c.Logger
-	mPool := c.TransporterMessagePool
-	ctx := *c.context
+	pool := c.transporterMessagePool
+	defer close(c.messageChannel)
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			log.Info("Connection reader cancelled")
-			break
-		default:
-			m := mPool.Obtain()
-			err := m.Read(c.connection)
-			if err != nil {
-				log.Error("%s error happened during reading: ", err)
-			}
-			c.MessageChannel <- m
+			return
+		}
+		container := pool.Obtain()
+		message, err := container.Data()
+		if err != nil {
+			// The container was handed back to us in a disposed state,
+			// which can only happen if the pool itself is broken.
+			log.Error(fmt.Sprintf("Unusable pooled message container: %s", err))
+			_ = container.Dispose()
+			return
+		}
+		if err := message.Read(c.connection); err != nil {
+			log.Error(fmt.Sprintf("Error happened during reading: %s", err))
+			_ = container.Dispose()
+			return
+		}
+		c.bytesReceived.Add(uint64(message.WireSize()))
+		c.recordCapture(pcapwriter.Incoming, message.Bytes())
+		select {
+		case c.messageChannel <- container:
+		case <-ctx.Done():
+			_ = container.Dispose()
+			return
 		}
 	}
 }
 
+// Close terminates the connection and stops the background reader.
 func (c *Client) Close() {
-	conn := *c.connection
-	cancelFunc := *c.cancelFunc
-	_ = conn.Close()
-	cancelFunc()
+	if c.cancelFunc != nil {
+		c.cancelFunc()
+	}
+	if c.connection != nil {
+		_ = c.connection.Close()
+	}
+	if capture := c.capture.Load(); capture != nil {
+		_ = capture.file.Close()
+	}
 }
 
-func (c *Client) Release(message *protocol.TransporterMessage) {
-	c.TransporterMessagePool.Release(message)
+// writeMessage serializes m onto the wire; see the writeMutex field comment
+// for why concurrent callers need this.
+func (c *Client) writeMessage(m *protocol.TransporterMessage) error {
+	c.writeMutex.Lock()
+	defer c.writeMutex.Unlock()
+	if err := m.Write(c.connection); err != nil {
+		return err
+	}
+	c.bytesSent.Add(uint64(m.WireSize()))
+	c.recordCapture(pcapwriter.Outgoing, m.Bytes())
+	return nil
+}
+
+// BytesSent and BytesReceived report the total wire bytes (header+payload,
+// across every message) sent and received on this connection so far, for
+// display (e.g. the TUI's transfer-stats footer). Safe for concurrent use.
+func (c *Client) BytesSent() uint64 {
+	return c.bytesSent.Load()
+}
+
+func (c *Client) BytesReceived() uint64 {
+	return c.bytesReceived.Load()
+}
+
+// withMessage obtains a pooled message, hands it to fn, and disposes of it
+// once fn returns.
+func (c *Client) withMessage(fn func(*protocol.TransporterMessage) error) error {
+	container := c.transporterMessagePool.Obtain()
+	defer container.Dispose()
+	message, err := container.Data()
+	if err != nil {
+		return err
+	}
+	return fn(message)
 }
 
 func (c *Client) SendError(command uint32, errorCode int, errorMessage string) error {
-	log := c.Logger
-	mPool := c.TransporterMessagePool
-	log.Info(fmt.Sprintf("SendError(%d, %s) called", errorCode, errorMessage))
-
-	errorTransporterMessage := mPool.Obtain()
-	errorTransporterMessage.SetErrorResponseCommand(command)
-	err := errorTransporterMessage.SetErrorPayload(&protocol.TransporterMessagePayloadError{
-		ErrorCode:    errorCode,
-		ErrorMessage: errorMessage,
+	c.Logger.Info(fmt.Sprintf("SendError(%d, %s) called", errorCode, errorMessage))
+	return c.withMessage(func(m *protocol.TransporterMessage) error {
+		m.SetErrorResponseCommand(command)
+		if err := m.SetErrorPayload(&protocol.TransporterMessagePayloadError{
+			ErrorCode:    errorCode,
+			ErrorMessage: errorMessage,
+		}); err != nil {
+			return err
+		}
+		return c.writeMessage(m)
 	})
-	if err != nil {
-		return err
-	}
-	return errorTransporterMessage.Write(c.connection)
 }
 
 func (c *Client) SendConnect() error {
-	log := c.Logger
-	mPool := c.TransporterMessagePool
-
-	log.Info("SendConnect called")
-
-	m := mPool.Obtain()
-	defer mPool.Release(m)
-	m.SetDirectCommand(protocol.CommandConnect)
-	err := m.SetPayloadConnect(&protocol.TransporterMessagePayloadConnect{
-		ProtocolVersion: protocol.ProtocolVersion,
+	c.Logger.Info("SendConnect called")
+	return c.withMessage(func(m *protocol.TransporterMessage) error {
+		m.SetDirectCommand(protocol.CommandConnect)
+		if err := m.SetPayloadConnect(&protocol.TransporterMessagePayloadConnect{
+			ProtocolVersion: protocol.ProtocolVersion,
+		}); err != nil {
+			return err
+		}
+		return c.writeMessage(m)
 	})
-	if err != nil {
-		return err
-	}
-	err = m.Write(c.connection)
-	return err
 }
 
 func (c *Client) SendCreateRoom() error {
-	log := c.Logger
-	mPool := c.TransporterMessagePool
-
-	log.Info("SendCreateRoom called")
-	m := mPool.Obtain()
-	defer mPool.Release(m)
-
-	m.SetDirectCommand(protocol.CommandCreateRoom)
-	err := m.Write(c.connection)
-	return err
-}
-
-func (c *Client) SendJoinRoom(roomId string) error {
-	log := c.Logger
-	mPool := c.TransporterMessagePool
-	m := mPool.Obtain()
-	defer mPool.Release(m)
-
-	log.Info("SendJoinRoom(%s) called", roomId)
-
-	m.SetDirectCommand(protocol.CommandJoinRoom)
-	err := m.SetPayloadConnectRoom(&protocol.TransporterMessagePayloadConnectRoom{
-		RoomId: roomId,
+	c.Logger.Info("SendCreateRoom called")
+	return c.withMessage(func(m *protocol.TransporterMessage) error {
+		m.SetDirectCommand(protocol.CommandCreateRoom)
+		return c.writeMessage(m)
 	})
-	if err != nil {
-		return err
-	}
-	err = m.Write(c.connection)
-	return err
 }
 
-func (c *Client) SendJoinRoomResponse(isAccepted int) error {
-	log := c.Logger
-	mPool := c.TransporterMessagePool
-	m := mPool.Obtain()
-	defer mPool.Release(m)
-
-	log.Info("SendJoinRoomResponse(%d) called", isAccepted)
-
-	m.SetResponseCommand(protocol.CommandJoinRoom)
-	err := m.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{
-		Accepted: isAccepted,
+// SendJoinRoom requests to join roomId, presenting publicKey as this
+// client's identity (see client/identity) so the room owner can verify a
+// fingerprint of it out of band before accepting.
+func (c *Client) SendJoinRoom(roomId string, publicKey []byte) error {
+	c.Logger.Info(fmt.Sprintf("SendJoinRoom(%s) called", roomId))
+	return c.withMessage(func(m *protocol.TransporterMessage) error {
+		m.SetDirectCommand(protocol.CommandJoinRoom)
+		if err := m.SetPayloadConnectRoom(&protocol.TransporterMessagePayloadConnectRoom{
+			RoomId:    roomId,
+			PublicKey: publicKey,
+		}); err != nil {
+			return err
+		}
+		return c.writeMessage(m)
 	})
-	if err != nil {
-		return err
-	}
-	err = m.Write(c.connection)
-	return err
 }
 
+// SendJoinRoomResponse sends the room owner's accept/decline decision,
+// presenting ownerPublicKey as this client's identity (see client/identity)
+// so the guest can display a fingerprint of it, symmetric with the owner
+// verifying the guest's. The transporter fills in the owner's client id
+// before forwarding to the guest.
+func (c *Client) SendJoinRoomResponse(isAccepted int, ownerPublicKey []byte) error {
+	c.Logger.Info(fmt.Sprintf("SendJoinRoomResponse(%d) called", isAccepted))
+	return c.withMessage(func(m *protocol.TransporterMessage) error {
+		m.SetResponseCommand(protocol.CommandJoinRoom)
+		if err := m.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{
+			Accepted:  isAccepted,
+			PublicKey: ownerPublicKey,
+		}); err != nil {
+			return err
+		}
+		return c.writeMessage(m)
+	})
+}
+
+// SendAdbMessage forwards a raw ADB protocol message to the peer on the
+// other side of the room, opaque to everything in between.
 func (c *Client) SendAdbMessage(message *adb.AdbMessage) error {
-	var err error
-	logger := c.Logger
-	mPool := c.TransporterMessagePool
-	transportMessage := mPool.Obtain()
-	defer mPool.Release(transportMessage)
-
-	length := message.DataLength() + adb.HeaderSize
-	checksum := crc32.ChecksumIEEE(message.Data()[:length])
-
-	logger.Info("Sending ADB message to transport")
-	transportMessage.SetHeader(protocol.CommandAdbTransport, length, checksum)
-	err = transportMessage.WriteHeader(c.connection)
-	if err != nil {
-		return err
-	}
-	err = message.Write(c.connection)
-	if err != nil {
-		return err
-	}
-	return nil
+	c.Logger.Info("Sending ADB message to transport")
+	return c.withMessage(func(m *protocol.TransporterMessage) error {
+		m.SetDirectCommand(protocol.CommandAdbTransport)
+		if err := m.SetRawPayload(message.Bytes()); err != nil {
+			return err
+		}
+		return c.writeMessage(m)
+	})
 }

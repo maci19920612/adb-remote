@@ -10,6 +10,11 @@ const (
 	CommandCreateRoom   uint32 = 0x0003
 	CommandJoinRoom     uint32 = 0x0004
 	CommandAdbTransport uint32 = 0x0006 //TODO: We should encrypt this command's payload
+	// CommandGuestLeft is sent by the transporter to the room owner (no
+	// payload, no response expected) when the guest disconnects from an
+	// active room. The owner's own transporter connection is unaffected by
+	// this, so it has no other way to learn the guest is gone.
+	CommandGuestLeft uint32 = 0x0007
 )
 
 const CommandResponseMask uint32 = 0x1000

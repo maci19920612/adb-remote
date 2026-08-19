@@ -5,18 +5,23 @@ import (
 	"os"
 )
 
+const DefaultConfigPath = "./config.json"
+
 type ClientConfiguration struct {
 	TransporterAddress string `json:"transporterAddress"`
 }
 
 func CreateConfig() (*ClientConfiguration, error) {
-	data, err := os.ReadFile("./config.json")
+	return LoadConfig(DefaultConfigPath)
+}
+
+func LoadConfig(path string) (*ClientConfiguration, error) {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
 	config := ClientConfiguration{}
-	err = json.Unmarshal(data, &config)
-	if err != nil {
+	if err := json.Unmarshal(data, &config); err != nil {
 		return nil, err
 	}
 	return &config, nil

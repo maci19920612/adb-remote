@@ -1,44 +1,66 @@
 package adb
 
 import (
-	"adb-remote.maci.team/client/transportLayer"
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 )
 
+// DefaultProxyPort is the local TCP port a guest's AdbProxy listens on by
+// default, for the local ADB server to "adb connect" to.
+const DefaultProxyPort = "5038"
+
+// deviceFeatures is advertised in our CNXN response's device banner. Most
+// importantly this must include shell_v2: without it, a real adb client
+// silently falls back to the legacy v1 "shell:" service, which relays
+// stdout/stderr fine but has no way to carry the remote command's exit
+// code back at all (adb always reports 0 regardless of what actually ran).
+// The rest mirror what a real, current adb-server/adbd pair commonly
+// support; if the underlying shared device doesn't actually support one,
+// that specific stream's OpenStream just fails, same as with any other
+// unsupported service request.
+const deviceFeatures = "shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,fixed_push_symlink_timestamp,abb_exec,remount_shell,track_app,sendrecv_v2"
+
+// IAdbProxy listens locally for a real ADB server to "adb connect" to,
+// performs the ADB CNXN handshake on its behalf (pretending to be a single
+// device named after the room), and hands the now-handshaked connection off
+// through Connections for a relay to pump ADB protocol messages over the
+// transporter.
 type IAdbProxy interface {
+	// Start begins listening for local ADB connections, presenting itself
+	// as a device named after roomId once a CNXN handshake completes.
 	Start(roomId string) error
+	// Stop closes the listener and any pending accept loop. Already
+	// handshaked connections handed out through Connections are left open;
+	// the caller owns their lifecycle from that point on.
 	Stop()
-	Write(message *AdbMessage) error
+	// Connections yields one net.Conn per successfully handshaked local
+	// ADB connection.
+	Connections() <-chan net.Conn
 }
 
 type AdbProxy struct {
 	port       string
-	ctx        *context.Context
-	cancelFunc *context.CancelFunc
-	listener   *net.Listener
-	conn       *net.Conn
-	adbMessage *AdbMessage
+	listener   net.Listener
+	cancelFunc context.CancelFunc
+
+	connections chan net.Conn
+
 	//Dependencies
 	logger *slog.Logger
-	client *transportLayer.Client
 }
 
-func NewAdbProxy(port string, logger *slog.Logger, client *transportLayer.Client) IAdbProxy {
-	ctx, cancelFunc := context.WithCancel(context.Background())
+func NewAdbProxy(port string, logger *slog.Logger) IAdbProxy {
 	return &AdbProxy{
-		port:       port,
-		ctx:        &ctx,
-		cancelFunc: &cancelFunc,
-		adbMessage: CreateMessage(),
-
-		//Dependencies
-		logger: logger,
-		client: client,
+		port:        port,
+		connections: make(chan net.Conn),
+		logger:      logger,
 	}
+}
+
+func (p *AdbProxy) Connections() <-chan net.Conn {
+	return p.connections
 }
 
 func (p *AdbProxy) Start(roomId string) error {
@@ -47,111 +69,77 @@ func (p *AdbProxy) Start(roomId string) error {
 	if err != nil {
 		return err
 	}
-	p.listener = &listener
-	//TODO: Move this into it's separate method
+	p.listener = listener
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	p.cancelFunc = cancelFunc
+
 	go func() {
-	mainLoop:
 		for {
-			select {
-			case <-(*p.ctx).Done():
-				logger.Info("AdbProxy stopped, exiting from the connection ACCEPT loop")
-				break mainLoop
-			default:
-				conn, err := listener.Accept()
-				if err != nil {
-					var opErr *net.OpError
-					if errors.As(err, &opErr) && opErr.Op == "accept" {
-						logger.Info("The listener closed")
-					} else {
-						logger.Error(fmt.Sprintf("Error during the connection ACCEPT %s", err))
-					}
-					break mainLoop
+			conn, err := listener.Accept()
+			if err != nil {
+				if ctx.Err() != nil {
+					logger.Info("AdbProxy stopped, exiting the connection accept loop")
+					return
 				}
-				logger.Info("Starting the new connection")
-				p.conn = &conn
-			connectionLoop:
-				for {
-					select {
-					case <-(*p.ctx).Done():
-						logger.Info("AdbProxy stopped, exiting the connection READER loop")
-						break mainLoop
-					default:
-						err = p.adbMessage.Read(p.conn)
-						if err != nil {
-							logger.Error(fmt.Sprintf("Invalid ADB message read from the network: %s", err))
-							_ = conn.Close()
-							p.conn = nil
-							break connectionLoop
-						}
-						if command := p.adbMessage.Command(); command != CommandConnect {
-							logger.Info(fmt.Sprintf("Unexpected command from the local ADB instance: %x", command))
-							_ = conn.Close()
-							p.conn = nil
-							break connectionLoop
-						}
-						protocolVersion := p.adbMessage.Arg1()
-						maxMessageSize := p.adbMessage.Arg2()
-						logger.Info(fmt.Sprintf("Protocol version: %d, max message size: %d", protocolVersion, maxMessageSize))
-						if maxMessageSize > MaxPayloadLength {
-							logger.Error(fmt.Sprintf("The local adb message size is too low, max allowed message size: %d", MaxPayloadLength))
-							_ = conn.Close()
-							p.conn = nil
-							break connectionLoop
-						}
-						p.adbMessage.Set(CommandConnect, protocolVersion, maxMessageSize, []byte(fmt.Sprintf("device:wrapper-remote-%s", roomId)))
-						err = p.adbMessage.Write(&conn)
-						if err != nil {
-							logger.Error(fmt.Sprintf("Error during the CNXN adb response sending: %s", err))
-							_ = conn.Close()
-							p.conn = nil
-							break connectionLoop
-						}
-						for {
-							err = p.adbMessage.Read(&conn)
-							if err != nil {
-								logger.Error(fmt.Sprintf("Error during the ADB message reading: %s", err))
-								_ = conn.Close()
-								p.conn = nil
-								break connectionLoop
-							}
-							p.client.SendCreateRoom()
-						}
-					}
-				}
+				logger.Error(fmt.Sprintf("Error during the connection accept: %s", err))
+				continue
 			}
+			logger.Info("Accepted a new local connection, starting the CNXN handshake")
+			go p.handleConnection(ctx, conn, roomId)
 		}
 	}()
 	return nil
 }
 
-func (p *AdbProxy) Stop() {
-	if p.conn != nil {
-		_ = (*p.conn).Close()
-		p.conn = nil
+func (p *AdbProxy) handleConnection(ctx context.Context, conn net.Conn, roomId string) {
+	logger := p.logger
+	message := CreateMessage()
+	if err := message.Read(conn); err != nil {
+		logger.Error(fmt.Sprintf("Invalid ADB message read from the network: %s", err))
+		_ = conn.Close()
+		return
 	}
-	if p.listener != nil {
-		_ = (*p.listener).Close()
-		p.listener = nil
+	if command := message.Command(); command != CommandConnect {
+		logger.Info(fmt.Sprintf("Unexpected command from the local ADB instance, expected CNXN: %x", command))
+		_ = conn.Close()
+		return
 	}
-	(*p.cancelFunc)()
-	p.ctx = nil
-	p.cancelFunc = nil
-	p.conn = nil
-	p.listener = nil
+	protocolVersion := message.Arg1()
+	peerMaxMessageSize := message.Arg2()
+	logger.Info(fmt.Sprintf("Protocol version: %d, peer max message size: %d", protocolVersion, peerMaxMessageSize))
+	// Each side of a CNXN handshake independently advertises its own
+	// MAXDATA; there is no requirement that they match. We always
+	// advertise our own capacity here regardless of what the peer offered
+	// (real adb clients commonly offer up to 1MiB, far more than our
+	// fixed-size buffers hold).
+	banner := fmt.Sprintf(
+		"device::ro.product.name=adb-remote;ro.product.model=wrapper-remote-%s;ro.product.device=wrapper-remote-%s;features=%s",
+		roomId, roomId, deviceFeatures,
+	)
+	if err := message.Set(CommandConnect, protocolVersion, MaxPayloadLength, []byte(banner)); err != nil {
+		logger.Error(fmt.Sprintf("Failed to build the CNXN response: %s", err))
+		_ = conn.Close()
+		return
+	}
+	if err := message.Write(conn); err != nil {
+		logger.Error(fmt.Sprintf("Error during the CNXN adb response sending: %s", err))
+		_ = conn.Close()
+		return
+	}
+
+	select {
+	case p.connections <- conn:
+	case <-ctx.Done():
+		_ = conn.Close()
+	}
 }
 
-func (p *AdbProxy) Write(message *AdbMessage) error {
-	logger := p.logger
-	if p.conn == nil {
-		logger.Error("No active connection with the local ADB instance, invalid WRITE attempt")
-		return errors.New("no active connection with the local ADB instance")
+func (p *AdbProxy) Stop() {
+	if p.cancelFunc != nil {
+		p.cancelFunc()
 	}
-	err := message.Write(p.conn)
-	if err != nil {
-		logger.Error(fmt.Sprintf("Error during the ADB message writing: %s", err))
-		_ = (*p.conn).Close()
-		p.conn = nil
-		return err
+	if p.listener != nil {
+		_ = p.listener.Close()
+		p.listener = nil
 	}
-	return nil
 }
