@@ -7,6 +7,10 @@ import (
 	"net"
 )
 
+// DefaultProxyPort is the local TCP port a guest's AdbProxy listens on by
+// default, for the local ADB server to "adb connect" to.
+const DefaultProxyPort = "5038"
+
 // IAdbProxy listens locally for a real ADB server to "adb connect" to,
 // performs the ADB CNXN handshake on its behalf (pretending to be a single
 // device named after the room), and hands the now-handshaked connection off

@@ -1,8 +1,11 @@
 package command
 
 import (
+	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/config"
+	"adb-remote.maci.team/client/controller"
 	"adb-remote.maci.team/client/transportLayer"
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -21,16 +24,21 @@ func CreateConnectCommand(
 				return InvalidCommandArgumentType
 			}
 			fmt.Printf("Target room: %s\n", *typedArgs.TargetRoomId)
-			return nil
+			if err := controller.Handshake(client); err != nil {
+				return err
+			}
+			return controller.JoinAsGuest(context.Background(), client, *typedArgs.TargetRoomId, *typedArgs.LocalPort)
 		},
 		ParameterFactory: func() (BaseCommand, error) {
 			flagSet := flag.NewFlagSet("connect", flag.ExitOnError)
 			targetRoomId := flagSet.String("targetRoomId", "", "The target room ID")
+			localPort := flagSet.String("port", adb.DefaultProxyPort, "The local port to expose the remote device on, for \"adb connect\" to use")
 			getHelp := flagSet.Bool("help", false, "Print this help")
 			return &commandConnectArgs{
 				FlagSet:      flagSet,
 				GetHelp:      getHelp,
 				TargetRoomId: targetRoomId,
+				LocalPort:    localPort,
 			}, nil
 		},
 
@@ -45,6 +53,7 @@ type commandConnectArgs struct {
 	FlagSet      *flag.FlagSet
 	GetHelp      *bool
 	TargetRoomId *string
+	LocalPort    *string
 }
 
 func (c *commandConnectArgs) GetFlagSet() *flag.FlagSet {

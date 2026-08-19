@@ -1,6 +1,7 @@
 package command
 
 import (
+	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/config"
 	"adb-remote.maci.team/client/transportLayer"
 	"flag"
@@ -16,9 +17,10 @@ type Command[T BaseCommand] struct {
 	ParameterFactory FlagSetFactory[T]
 
 	//Dependencies
-	Logger *slog.Logger
-	Client *transportLayer.Client
-	Config *config.ClientConfiguration
+	Logger      *slog.Logger
+	Client      *transportLayer.Client
+	Config      *config.ClientConfiguration
+	SmartSocket adb.IAdbSmartSocket
 }
 
 type BaseCommand interface {

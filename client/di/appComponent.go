@@ -15,8 +15,8 @@ func CreateContainer() *container.Container {
 	registerLogger(&cont)
 	registerConfig(&cont)
 	registerClient(&cont)
+	registerSmartSocket(&cont)
 	registerCommands(&cont)
-	registerAdbProxy(&cont)
 	return &cont
 }
 
@@ -47,28 +47,28 @@ func registerClient(container *container.Container) {
 	}
 }
 
+func registerSmartSocket(container *container.Container) {
+	err := container.Singleton(func(logger *slog.Logger) adb.IAdbSmartSocket {
+		return adb.NewAdbSmartSocket(logger)
+	})
+	if err != nil {
+		panic(err)
+	}
+}
+
 func registerCommands(container *container.Container) {
-	err := container.Singleton(func(logger *slog.Logger, client *transportLayer.Client, config *config.ClientConfiguration) []*command.Command[command.BaseCommand] {
+	err := container.Singleton(func(
+		logger *slog.Logger,
+		client *transportLayer.Client,
+		smartSocket adb.IAdbSmartSocket,
+		config *config.ClientConfiguration,
+	) []*command.Command[command.BaseCommand] {
 		return []*command.Command[command.BaseCommand]{
-			command.CreateShareCommand(logger, client, config),
+			command.CreateShareCommand(logger, client, smartSocket, config),
 			command.CreateConnectCommand(logger, client, config),
 		}
 	})
 	if err != nil {
 		panic(err)
 	}
-}
-
-func registerAdbProxy(container *container.Container) {
-	err := container.Singleton(func(logger *slog.Logger, client *transportLayer.Client, config *config.ClientConfiguration) adb.IAdbProxy {
-		return adb.NewAdbProxy(config.TransporterAddress, logger, client)
-	})
-	if err != nil {
-		panic(err)
-	}
-}
-
-func registerAdbSmartSocket(container *container.Container) {
-	err := container.Singleton(func(logger *slog.Logger) {
-	})
 }

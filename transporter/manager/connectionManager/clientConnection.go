@@ -6,21 +6,24 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 )
 
 type ClientConnection struct {
-	connection  net.Conn
-	owner       *ConnectionManager
-	clientId    string
-	isConnected bool
+	connection net.Conn
+	owner      *ConnectionManager
+	clientId   string
+	closeOnce  sync.Once
 }
 
+// internalClose is called both from the connection's own read loop (on a
+// read error) and from ConnectionManager.Stop (closing every connection
+// concurrently); sync.Once keeps the actual close/unregister logic from
+// running more than once no matter which caller wins the race.
 func (cc *ClientConnection) internalClose() {
-	if !cc.isConnected {
-		return
-	}
-	cc.isConnected = false
-	cc.owner.internalCloseClient(cc)
+	cc.closeOnce.Do(func() {
+		cc.owner.internalCloseClient(cc)
+	})
 }
 
 func (cc *ClientConnection) GetClientId() string {

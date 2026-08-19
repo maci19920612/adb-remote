@@ -30,7 +30,7 @@ type ConnectionManager struct {
 	config                    *config.TransporterConfiguration
 	server                    net.Listener
 	connections               *list.List
-	connectionsMutex          *sync.Mutex
+	mutex                     *sync.Mutex
 	context                   context.Context
 	cancelFunc                context.CancelFunc
 	logger                    *slog.Logger
@@ -48,7 +48,7 @@ func CreateConnectionManager(config *config.TransporterConfiguration, logger *sl
 		transporterMessagePool:    utils.NewObjectPool(transporterMessageFactory),
 		waitGroup:                 new(sync.WaitGroup),
 		connections:               list.New(),
-		connectionsMutex:          new(sync.Mutex),
+		mutex:                     new(sync.Mutex),
 		context:                   ctx,
 		cancelFunc:                cancelFunc,
 		logger:                    logger,
@@ -67,7 +67,9 @@ func (cm *ConnectionManager) StartServer() error {
 		logger.Error(fmt.Sprintf("Transporter server can't be created: %s", err))
 		return err
 	}
+	cm.mutex.Lock()
 	cm.server = server
+	cm.mutex.Unlock()
 
 	cm.waitGroup.Add(1)
 	go func() {
@@ -85,9 +87,8 @@ func (cm *ConnectionManager) StartServer() error {
 			}
 
 			clientConnection := &ClientConnection{
-				connection:  connection,
-				owner:       cm,
-				isConnected: true,
+				connection: connection,
+				owner:      cm,
 			}
 			cm.registerConnection(clientConnection)
 			clientConnection.start()
@@ -102,25 +103,26 @@ func (cm *ConnectionManager) StartServer() error {
 // StartServer to return.
 func (cm *ConnectionManager) Stop() {
 	cm.cancelFunc()
-	if cm.server != nil {
-		_ = cm.server.Close()
-	}
 
-	cm.connectionsMutex.Lock()
+	cm.mutex.Lock()
+	server := cm.server
 	connections := make([]*ClientConnection, 0, cm.connections.Len())
 	for element := cm.connections.Front(); element != nil; element = element.Next() {
 		connections = append(connections, element.Value.(*ClientConnection))
 	}
-	cm.connectionsMutex.Unlock()
+	cm.mutex.Unlock()
 
+	if server != nil {
+		_ = server.Close()
+	}
 	for _, connection := range connections {
 		_ = connection.Close()
 	}
 }
 
 func (cm *ConnectionManager) registerConnection(clientConnection *ClientConnection) {
-	cm.connectionsMutex.Lock()
-	defer cm.connectionsMutex.Unlock()
+	cm.mutex.Lock()
+	defer cm.mutex.Unlock()
 	cm.connections.PushFront(clientConnection)
 }
 
@@ -130,7 +132,7 @@ func (cm *ConnectionManager) internalCloseClient(clientConnection *ClientConnect
 		cm.logger.Warn(fmt.Sprintf("Error during the client connection close, silently ignored: %s", err))
 	}
 
-	cm.connectionsMutex.Lock()
+	cm.mutex.Lock()
 	var target *list.Element
 	for element := cm.connections.Front(); element != nil; element = element.Next() {
 		if element.Value == clientConnection {
@@ -141,7 +143,7 @@ func (cm *ConnectionManager) internalCloseClient(clientConnection *ClientConnect
 	if target != nil {
 		cm.connections.Remove(target)
 	}
-	cm.connectionsMutex.Unlock()
+	cm.mutex.Unlock()
 
 	if target == nil {
 		cm.logger.Warn("Client connection not registered, can't be closed")

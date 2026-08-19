@@ -1,15 +1,22 @@
 package command
 
 import (
+	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/config"
 	"adb-remote.maci.team/client/controller"
 	"adb-remote.maci.team/client/transportLayer"
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
 )
 
-func CreateShareCommand(logger *slog.Logger, client *transportLayer.Client, config *config.ClientConfiguration) *Command[BaseCommand] {
+func CreateShareCommand(
+	logger *slog.Logger,
+	client *transportLayer.Client,
+	smartSocket adb.IAdbSmartSocket,
+	config *config.ClientConfiguration,
+) *Command[BaseCommand] {
 	return &Command[BaseCommand]{
 		Name: "share",
 		Handler: func(args BaseCommand) error {
@@ -18,9 +25,10 @@ func CreateShareCommand(logger *slog.Logger, client *transportLayer.Client, conf
 				return InvalidCommandArgumentType
 			}
 			fmt.Printf("Target device: %s\n", *typedArgs.TargetDevice)
-			controller.Handshake(client)
-			controller.JoinAsRoomOwner(client, *typedArgs.TargetDevice)
-			return nil
+			if err := controller.Handshake(client); err != nil {
+				return err
+			}
+			return controller.JoinAsRoomOwner(context.Background(), client, smartSocket, *typedArgs.TargetDevice, controller.TTYAcceptPrompt)
 		},
 		ParameterFactory: func() (BaseCommand, error) {
 			flagSet := flag.NewFlagSet("share", flag.ExitOnError)
@@ -34,9 +42,10 @@ func CreateShareCommand(logger *slog.Logger, client *transportLayer.Client, conf
 		},
 
 		//Dependencies
-		Logger: logger,
-		Client: client,
-		Config: config,
+		Logger:      logger,
+		Client:      client,
+		Config:      config,
+		SmartSocket: smartSocket,
 	}
 }
 

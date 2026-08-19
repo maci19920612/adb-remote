@@ -19,38 +19,47 @@ func printGlobalHelp(commands []*Command[BaseCommand]) {
 	fmt.Printf("\n To get additional help use the specific command --help flag\n")
 }
 
-func ParseCommand(commands []*Command[BaseCommand]) {
+func findCommand(commands []*Command[BaseCommand], name string) *Command[BaseCommand] {
+	for _, command := range commands {
+		if command.Name == name {
+			return command
+		}
+	}
+	return nil
+}
+
+// ParseCommand parses os.Args against the given commands, connects the
+// shared transport client, and runs the matched command's handler.
+func ParseCommand(commands []*Command[BaseCommand]) error {
 	args := os.Args
 	if len(args) < 2 {
 		printGlobalHelp(commands)
-		return
+		return nil
 	}
-	commandArg := args[1]
-	var targetCommand *Command[BaseCommand] = nil
-	for index := range commands {
-		if commands[index].Name == commandArg {
-			targetCommand = commands[index]
-		}
-	}
+
+	targetCommand := findCommand(commands, args[1])
 	if targetCommand == nil {
 		printGlobalHelp(commands)
-		return
+		return nil
 	}
+
 	parameter, err := targetCommand.ParameterFactory()
 	if err != nil {
-		panic(err)
+		return err
 	}
 	targetFlagSet := parameter.GetFlagSet()
-	err = targetFlagSet.Parse(args[2:])
-	if err != nil {
-		panic(err)
+	if err := targetFlagSet.Parse(args[2:]); err != nil {
+		return err
 	}
 	if parameter.IsHelp() {
 		targetFlagSet.Usage()
-		return
+		return nil
 	}
-	err = targetCommand.Handler(parameter)
-	if err != nil {
-		panic(err)
+
+	if err := targetCommand.Client.Start(); err != nil {
+		return fmt.Errorf("failed to connect to the transporter at %s: %w", targetCommand.Config.TransporterAddress, err)
 	}
+	defer targetCommand.Client.Close()
+
+	return targetCommand.Handler(parameter)
 }
