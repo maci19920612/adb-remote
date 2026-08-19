@@ -169,3 +169,23 @@ func TestReadStringRejectsTruncatedBuffer(t *testing.T) {
 		t.Fatalf("expected an error reading a string whose declared length exceeds the buffer")
 	}
 }
+
+// TestReadStringRejectsOverflowingLength is a regression test for an
+// attacker-controlled length field (e.g. RoomId on a CommandJoinRoom
+// message) large enough that dataOffset+length wraps a uint32. Before the
+// bounds-vs-remaining-payload check, the wrapped newOffset could land below
+// dataOffset and pass the naive "< PayloadLength()" check, then panic
+// slicing payloadBuffer[dataOffset:newOffset] with low > high — a
+// single-message, pre-auth crash of anything parsing the message (the
+// transporter parses this field before any room lookup).
+func TestReadStringRejectsOverflowingLength(t *testing.T) {
+	m := CreateTransporterMessage()
+	raw := make([]byte, 8)
+	ByteOrder.PutUint32(raw[0:4], 0xFFFFFFFC) // dataOffset(4) + this wraps to 0
+	if err := m.SetRawPayload(raw); err != nil {
+		t.Fatalf("SetRawPayload failed: %s", err)
+	}
+	if _, _, err := m.readString(0); err == nil {
+		t.Fatalf("expected an error rejecting the overflowing length, not a silently wrapped offset")
+	}
+}

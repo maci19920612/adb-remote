@@ -56,9 +56,26 @@ func (rm *RoomManager) run(ctx context.Context) {
 			logger.Info(fmt.Sprintf("RoomManager: Client disconnected: %p", client))
 			rm.handleClientDisconnected(client)
 		case messageContainer := <-cm.ClientMessageChannel:
-			rm.dispatchMessage(messageContainer)
+			rm.dispatchMessageSafely(messageContainer)
 		}
 	}
+}
+
+// dispatchMessageSafely wraps dispatchMessage with a recover. dispatchMessage
+// (and the payload parsing it triggers) runs on this single goroutine shared
+// across every room and client in the process, so a panic triggered by one
+// malformed message from one client — a parsing bug, not necessarily this
+// specific one — would otherwise crash the transporter for everyone instead
+// of just that one client's connection.
+func (rm *RoomManager) dispatchMessageSafely(messageContainer *connectionManager.ClientMessageContainer) {
+	defer func() {
+		if r := recover(); r != nil {
+			sender := messageContainer.Sender
+			rm.logger.Error(fmt.Sprintf("RoomManager: recovered from a panic handling a message from %p (%s), closing the connection: %v", sender, sender.GetClientId(), r))
+			_ = sender.Close()
+		}
+	}()
+	rm.dispatchMessage(messageContainer)
 }
 
 func (rm *RoomManager) dispatchMessage(messageContainer *connectionManager.ClientMessageContainer) {

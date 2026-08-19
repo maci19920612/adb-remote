@@ -293,10 +293,18 @@ func (m *TransporterMessage) readString(offset uint32) (uint32, string, error) {
 		return 0, "", fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", m.PayloadLength(), dataOffset)
 	}
 	length := ByteOrder.Uint32(m.payloadBuffer[offset:dataOffset])
-	newOffset := dataOffset + length
-	if m.PayloadLength() < newOffset {
-		return 0, "", fmt.Errorf("not enough data in the payload buffer, size: %d, offset: %d", m.PayloadLength(), newOffset)
+	// length is attacker-controlled (read verbatim off the wire). Compare
+	// against the remaining payload instead of computing dataOffset+length
+	// directly: with dataOffset already bounded by PayloadLength() (checked
+	// above) and length otherwise unbounded, that addition can wrap a
+	// uint32 (e.g. length near 0xFFFFFFFF) and produce a newOffset that
+	// passes a naive "< PayloadLength()" check while landing below
+	// dataOffset, which then panics slicing payloadBuffer[dataOffset:newOffset].
+	remaining := m.PayloadLength() - dataOffset
+	if length > remaining {
+		return 0, "", fmt.Errorf("declared string length %d exceeds the remaining payload (%d bytes)", length, remaining)
 	}
+	newOffset := dataOffset + length
 	value := string(m.payloadBuffer[dataOffset:newOffset])
 	return newOffset, value, nil
 }

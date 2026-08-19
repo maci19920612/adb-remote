@@ -36,6 +36,19 @@ func (cc *ClientConnection) start() {
 
 func (cc *ClientConnection) run() {
 	logger := cc.owner.logger
+	// An unrecovered panic on any goroutine terminates the whole process,
+	// not just this connection's — a bug triggered by one malformed message
+	// from one client would otherwise crash the transporter for every other
+	// room and user. Recovering here downgrades that to "this one
+	// connection gets closed", the same outcome as any other malformed
+	// message.
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error(fmt.Sprintf("%p (%s): recovered from a panic, closing the connection: %v", cc, cc.GetClientId(), r))
+			cc.internalClose()
+		}
+	}()
+
 	logger.Info(fmt.Sprintf("%p (-): Client connection started", cc))
 
 	if !cc.performHandshake() {

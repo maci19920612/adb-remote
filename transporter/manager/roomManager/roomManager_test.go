@@ -348,6 +348,50 @@ func TestJoinRoomNotFound(t *testing.T) {
 	}
 }
 
+// TestMalformedJoinRoomLengthDoesNotCrashTransporter is a regression test
+// for a real bug: RoomId's attacker-controlled string length field could
+// overflow uint32 arithmetic in readString and panic parsing the message.
+// Since RoomManager.dispatchMessage runs on a single goroutine shared by
+// every room and client, an unrecovered panic there would have crashed the
+// transporter for everyone (not just the sender) — if this test's process
+// survives to reach the final assertion at all, the crash half of that bug
+// is gone; the payload-level regression test lives in
+// shared/protocol/payload.definition_test.go.
+func TestMalformedJoinRoomLengthDoesNotCrashTransporter(t *testing.T) {
+	address := startTestSystem(t)
+	attacker := dialTestClient(t, address)
+
+	malicious := protocol.CreateTransporterMessage()
+	malicious.SetDirectCommand(protocol.CommandJoinRoom)
+	raw := make([]byte, 8)
+	protocol.ByteOrder.PutUint32(raw[0:4], 0xFFFFFFFC) // RoomId length: dataOffset(4)+this overflows to 0
+	if err := malicious.SetRawPayload(raw); err != nil {
+		t.Fatalf("SetRawPayload failed: %s", err)
+	}
+	if err := malicious.Write(attacker.conn); err != nil {
+		t.Fatalf("failed to write the malicious message: %s", err)
+	}
+
+	response := attacker.readMessage()
+	if !response.IsError() {
+		t.Fatalf("expected an invalid-payload error response, got command %x", response.Command())
+	}
+	payload, err := response.GetErrorPayload()
+	if err != nil {
+		t.Fatalf("GetErrorPayload failed: %s", err)
+	}
+	if payload.ErrorCode != protocol.ErrorInvalidPayload {
+		t.Fatalf("expected error code %d, got %d", protocol.ErrorInvalidPayload, payload.ErrorCode)
+	}
+
+	// The transporter itself must have survived: a fresh, well-behaved pair
+	// of clients can still use it normally.
+	owner := dialTestClient(t, address)
+	guest := dialTestClient(t, address)
+	roomId := owner.createRoom()
+	joinRoomAndAccept(t, owner, guest, roomId)
+}
+
 // TestAdbTransportIsRelayedBetweenRoomParticipants exercises the core
 // missing feature: once a room is established, opaque ADB transport
 // messages sent by either participant must be forwarded to the other.
