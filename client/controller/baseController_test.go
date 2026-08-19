@@ -6,11 +6,19 @@ import (
 	"testing"
 )
 
+type handshakeResult struct {
+	clientId string
+	err      error
+}
+
 func TestHandshakeSuccess(t *testing.T) {
 	client, server := newConnectedClient(t)
 
-	done := make(chan error, 1)
-	go func() { done <- Handshake(client) }()
+	done := make(chan handshakeResult, 1)
+	go func() {
+		clientId, err := Handshake(client)
+		done <- handshakeResult{clientId, err}
+	}()
 
 	request := readMessage(t, server)
 	if request.Command() != protocol.CommandConnect {
@@ -26,16 +34,23 @@ func TestHandshakeSuccess(t *testing.T) {
 		t.Fatalf("failed to write the response: %s", err)
 	}
 
-	if err := <-done; err != nil {
-		t.Fatalf("Handshake failed: %s", err)
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("Handshake failed: %s", result.err)
+	}
+	if result.clientId != "CLIENT1" {
+		t.Fatalf("expected client id %q, got %q", "CLIENT1", result.clientId)
 	}
 }
 
 func TestHandshakeReportsServerError(t *testing.T) {
 	client, server := newConnectedClient(t)
 
-	done := make(chan error, 1)
-	go func() { done <- Handshake(client) }()
+	done := make(chan handshakeResult, 1)
+	go func() {
+		clientId, err := Handshake(client)
+		done <- handshakeResult{clientId, err}
+	}()
 
 	readMessage(t, server)
 
@@ -51,11 +66,11 @@ func TestHandshakeReportsServerError(t *testing.T) {
 		t.Fatalf("failed to write the response: %s", err)
 	}
 
-	err := <-done
-	if err == nil {
+	result := <-done
+	if result.err == nil {
 		t.Fatalf("expected Handshake to fail")
 	}
-	if !strings.Contains(err.Error(), "unsupported protocol version") {
-		t.Fatalf("expected the error to mention the server message, got: %s", err)
+	if !strings.Contains(result.err.Error(), "unsupported protocol version") {
+		t.Fatalf("expected the error to mention the server message, got: %s", result.err)
 	}
 }

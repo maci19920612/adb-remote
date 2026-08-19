@@ -118,7 +118,7 @@ func TestHandleJoinRequestAccepted(t *testing.T) {
 				t.Errorf("expected guest client id %q, got %q", "GUEST1", clientId)
 			}
 			return true, nil
-		}, "GUEST1")
+		}, nil, "GUEST1")
 	}()
 
 	if accepted := expectJoinResponse(t, server); accepted != 1 {
@@ -133,7 +133,7 @@ func TestHandleJoinRequestDeclined(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		handleJoinRequest(client, func(clientId string) (bool, error) { return false, nil }, "GUEST1")
+		handleJoinRequest(client, func(clientId string) (bool, error) { return false, nil }, nil, "GUEST1")
 	}()
 
 	if accepted := expectJoinResponse(t, server); accepted != 0 {
@@ -172,6 +172,17 @@ func (f *fakeSmartSocket) OpenStream(targetSerial string, service string) (net.C
 	return conn, nil
 }
 
+func expectOwnerEvent(t *testing.T, events <-chan OwnerEvent) OwnerEvent {
+	t.Helper()
+	select {
+	case e := <-events:
+		return e
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for an owner event")
+		return OwnerEvent{}
+	}
+}
+
 // TestJoinAsRoomOwnerRelaysAdbTraffic exercises the full owner-side path:
 // create a room, accept a join request, open a stream for a service, and
 // confirm ADB traffic is relayed correctly in both directions, including
@@ -182,18 +193,38 @@ func TestJoinAsRoomOwnerRelaysAdbTraffic(t *testing.T) {
 	defer deviceConn.Close()
 	smartSocket := newFakeSmartSocket().withStream("shell,v2,raw:echo hi", ownerSideConn)
 
+	events := make(chan OwnerEvent, 10)
+	onEvent := func(e OwnerEvent) { events <- e }
+
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
 		done <- JoinAsRoomOwner(ctx, client, smartSocket, "emulator-5554", func(clientId string) (bool, error) {
 			return true, nil
-		})
+		}, onEvent)
 	}()
 
+	// The room id and the guest's join request/decision must have been
+	// reported as events, since JoinAsRoomOwner no longer prints anything
+	// itself — that's now entirely the caller's (e.g. the TUI's) job.
 	respondToCreateRoom(t, server, "ROOM7")
+	roomCreated := expectOwnerEvent(t, events)
+	if roomCreated.Kind != OwnerRoomCreated || roomCreated.RoomId != "ROOM7" {
+		t.Fatalf("expected OwnerRoomCreated with room id ROOM7, got %+v", roomCreated)
+	}
+
 	sendJoinRoomRequest(t, server, "ROOM7", "GUEST1")
 	if accepted := expectJoinResponse(t, server); accepted != 1 {
 		t.Fatalf("expected the join request to be accepted, got Accepted=%d", accepted)
+	}
+
+	joinRequested := expectOwnerEvent(t, events)
+	if joinRequested.Kind != OwnerJoinRequested || joinRequested.GuestClientId != "GUEST1" {
+		t.Fatalf("expected a join request event from GUEST1, got %+v", joinRequested)
+	}
+	joinDecided := expectOwnerEvent(t, events)
+	if joinDecided.Kind != OwnerJoinDecided || joinDecided.GuestClientId != "GUEST1" || !joinDecided.Accepted {
+		t.Fatalf("expected GUEST1 to be reported as accepted, got %+v", joinDecided)
 	}
 
 	// Guest opens a stream.
@@ -316,7 +347,7 @@ func TestJoinRequestDoesNotBlockActiveStreamTraffic(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- JoinAsRoomOwner(ctx, client, smartSocket, "emulator-5554", promptAccept)
+		done <- JoinAsRoomOwner(ctx, client, smartSocket, "emulator-5554", promptAccept, nil)
 	}()
 
 	respondToCreateRoom(t, server, "ROOM7")

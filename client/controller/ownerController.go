@@ -7,7 +7,6 @@ import (
 	"adb-remote.maci.team/shared/protocol"
 	"context"
 	"fmt"
-	"github.com/mattn/go-tty"
 )
 
 // AcceptPromptFunc decides whether a room join request from guestClientId
@@ -15,19 +14,21 @@ import (
 type AcceptPromptFunc func(guestClientId string) (accepted bool, err error)
 
 // JoinAsRoomOwner creates a room sharing deviceId, then services the room
-// for its whole lifetime: every ADB stream a guest opens is relayed via an
+// for its whole lifetime: every ADB stream a guest opens is relayed via a
 // relay.OwnerMultiplexer, and every join request is handed to promptAccept
-// off the dispatch loop (promptAccept commonly blocks on TTY input; it must
-// not stall ADB traffic for a guest that is already connected). Returns
-// when ctx is cancelled or the transporter connection is lost.
-func JoinAsRoomOwner(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, deviceId string, promptAccept AcceptPromptFunc) error {
+// off the dispatch loop (promptAccept commonly blocks on user input; it
+// must not stall ADB traffic for a guest that is already connected). State
+// changes are reported through onEvent; all presentation is the caller's
+// responsibility. Returns when ctx is cancelled or the transporter
+// connection is lost.
+func JoinAsRoomOwner(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, deviceId string, promptAccept AcceptPromptFunc, onEvent OwnerEventFunc) error {
 	logger := client.Logger
 
 	roomId, err := createRoom(client)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Your room id is: %s\n", roomId)
+	emitOwner(onEvent, OwnerEvent{Kind: OwnerRoomCreated, RoomId: roomId})
 
 	multiplexer := relay.NewOwnerMultiplexer(smartSocket, deviceId, client, logger)
 	defer multiplexer.Close()
@@ -40,14 +41,14 @@ func JoinAsRoomOwner(ctx context.Context, client *transportLayer.Client, smartSo
 			if !ok {
 				return relay.ErrTransportClosed
 			}
-			dispatchOwnerMessage(client, multiplexer, promptAccept, container)
+			dispatchOwnerMessage(client, multiplexer, promptAccept, onEvent, container)
 		}
 	}
 }
 
 // dispatchOwnerMessage routes a single incoming message either to the ADB
 // stream multiplexer or to the room join-request flow.
-func dispatchOwnerMessage(client *transportLayer.Client, multiplexer *relay.OwnerMultiplexer, promptAccept AcceptPromptFunc, container *transportLayer.MessageContainer) {
+func dispatchOwnerMessage(client *transportLayer.Client, multiplexer *relay.OwnerMultiplexer, promptAccept AcceptPromptFunc, onEvent OwnerEventFunc, container *transportLayer.MessageContainer) {
 	logger := client.Logger
 
 	message, err := container.Data()
@@ -70,22 +71,24 @@ func dispatchOwnerMessage(client *transportLayer.Client, multiplexer *relay.Owne
 			}
 			return
 		}
-		// promptAccept commonly blocks on TTY input; run it off the
+		emitOwner(onEvent, OwnerEvent{Kind: OwnerJoinRequested, GuestClientId: payload.ClientId})
+		// promptAccept commonly blocks on user input; run it off the
 		// dispatch loop so an already-connected guest's ADB traffic keeps
 		// flowing while the operator decides.
-		go handleJoinRequest(client, promptAccept, payload.ClientId)
+		go handleJoinRequest(client, promptAccept, onEvent, payload.ClientId)
 	default:
 		defer container.Dispose()
 		logger.Info(fmt.Sprintf("Ignoring unexpected message, command: %x", message.Command()))
 	}
 }
 
-func handleJoinRequest(client *transportLayer.Client, promptAccept AcceptPromptFunc, guestClientId string) {
+func handleJoinRequest(client *transportLayer.Client, promptAccept AcceptPromptFunc, onEvent OwnerEventFunc, guestClientId string) {
 	logger := client.Logger
 
 	accepted, err := promptAccept(guestClientId)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Error while deciding whether to accept the join request from %s: %s", guestClientId, err))
+		emitOwner(onEvent, OwnerEvent{Kind: OwnerJoinFailed, GuestClientId: guestClientId, Err: err})
 		if err := client.SendError(protocol.CommandJoinRoom, protocol.ErrorUnknown, "Client side error, connection will be closed"); err != nil {
 			logger.Error(fmt.Sprintf("Failed to send the join-request error: %s", err))
 		}
@@ -98,7 +101,10 @@ func handleJoinRequest(client *transportLayer.Client, promptAccept AcceptPromptF
 	}
 	if err := client.SendJoinRoomResponse(isAccepted); err != nil {
 		logger.Error(fmt.Sprintf("Failed to send the join room response for %s: %s", guestClientId, err))
+		emitOwner(onEvent, OwnerEvent{Kind: OwnerJoinFailed, GuestClientId: guestClientId, Err: err})
+		return
 	}
+	emitOwner(onEvent, OwnerEvent{Kind: OwnerJoinDecided, GuestClientId: guestClientId, Accepted: accepted})
 }
 
 func createRoom(client *transportLayer.Client) (string, error) {
@@ -127,29 +133,4 @@ func createRoom(client *transportLayer.Client) (string, error) {
 		return "", err
 	}
 	return payload.RoomId, nil
-}
-
-// TTYAcceptPrompt asks the operator, over the controlling TTY, whether to
-// accept a room join request.
-func TTYAcceptPrompt(guestClientId string) (bool, error) {
-	ttySession, err := tty.Open()
-	if err != nil {
-		return false, err
-	}
-	defer ttySession.Close()
-
-	for {
-		fmt.Printf("Do you accept the room join request (clientId:%s) (y/n): ", guestClientId)
-		rawAnswer, err := ttySession.ReadRune()
-		if err != nil {
-			fmt.Println("Error during the TTY reading: ", err)
-			continue
-		}
-		fmt.Printf(" %c \n", rawAnswer)
-		if rawAnswer != 'y' && rawAnswer != 'n' {
-			fmt.Println("Your answer is not acceptable, the only acceptable answers: y/n")
-			continue
-		}
-		return rawAnswer == 'y', nil
-	}
 }
