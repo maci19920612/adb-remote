@@ -7,7 +7,10 @@ import (
 	"adb-remote.maci.team/client/transportLayer"
 	"adb-remote.maci.team/shared/prettyLogHandler"
 	"github.com/golobby/container/v3"
+	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 )
 
 func CreateContainer() *container.Container {
@@ -20,9 +23,22 @@ func CreateContainer() *container.Container {
 	return &cont
 }
 
+// logFilePath is where client logs go. Both `share` and `connect` run a
+// full-screen TUI on stdout (see client/tui); a log line writing straight
+// to stdout out-of-band would corrupt that rendering, so logs go to a file
+// instead.
+var logFilePath = filepath.Join(os.TempDir(), "adb-remote-client.log")
+
 func registerLogger(container *container.Container) {
 	err := container.Singleton(func() *slog.Logger {
-		return slog.New(prettyLogHandler.CreatePrettyHandler(&slog.HandlerOptions{}))
+		var writer io.Writer
+		logFile, err := os.OpenFile(logFilePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			writer = io.Discard
+		} else {
+			writer = logFile
+		}
+		return slog.New(prettyLogHandler.CreatePrettyHandler(writer, &slog.HandlerOptions{}))
 	})
 	if err != nil {
 		panic(err)
