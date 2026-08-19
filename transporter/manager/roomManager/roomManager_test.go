@@ -132,9 +132,14 @@ func (tc *testClient) createRoom() string {
 
 func (tc *testClient) joinRoom(roomId string) {
 	tc.t.Helper()
+	tc.joinRoomWithKey(roomId, nil)
+}
+
+func (tc *testClient) joinRoomWithKey(roomId string, publicKey []byte) {
+	tc.t.Helper()
 	request := protocol.CreateTransporterMessage()
 	request.SetDirectCommand(protocol.CommandJoinRoom)
-	if err := request.SetPayloadConnectRoom(&protocol.TransporterMessagePayloadConnectRoom{RoomId: roomId}); err != nil {
+	if err := request.SetPayloadConnectRoom(&protocol.TransporterMessagePayloadConnectRoom{RoomId: roomId, PublicKey: publicKey}); err != nil {
 		tc.t.Fatalf("SetPayloadConnectRoom failed: %s", err)
 	}
 	if err := request.Write(tc.conn); err != nil {
@@ -144,6 +149,12 @@ func (tc *testClient) joinRoom(roomId string) {
 
 func (tc *testClient) expectJoinRoomRequest() (roomId string, guestClientId string) {
 	tc.t.Helper()
+	roomId, guestClientId, _ = tc.expectJoinRoomRequestWithKey()
+	return roomId, guestClientId
+}
+
+func (tc *testClient) expectJoinRoomRequestWithKey() (roomId string, guestClientId string, guestPublicKey []byte) {
+	tc.t.Helper()
 	message := tc.readMessage()
 	if message.Command() != protocol.CommandJoinRoom {
 		tc.t.Fatalf("expected a join room request, got %x", message.Command())
@@ -152,14 +163,19 @@ func (tc *testClient) expectJoinRoomRequest() (roomId string, guestClientId stri
 	if err != nil {
 		tc.t.Fatalf("GetPayloadConnectRoom failed: %s", err)
 	}
-	return payload.RoomId, payload.ClientId
+	return payload.RoomId, payload.ClientId, payload.PublicKey
 }
 
 func (tc *testClient) respondToJoinRoom(accepted int) {
 	tc.t.Helper()
+	tc.respondToJoinRoomWithKey(accepted, nil)
+}
+
+func (tc *testClient) respondToJoinRoomWithKey(accepted int, ownerPublicKey []byte) {
+	tc.t.Helper()
 	response := protocol.CreateTransporterMessage()
 	response.SetResponseCommand(protocol.CommandJoinRoom)
-	if err := response.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{Accepted: accepted}); err != nil {
+	if err := response.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{Accepted: accepted, PublicKey: ownerPublicKey}); err != nil {
 		tc.t.Fatalf("SetPayloadConnectRoomResult failed: %s", err)
 	}
 	if err := response.Write(tc.conn); err != nil {
@@ -169,6 +185,12 @@ func (tc *testClient) respondToJoinRoom(accepted int) {
 
 func (tc *testClient) expectJoinRoomResponse() int {
 	tc.t.Helper()
+	accepted, _, _ := tc.expectJoinRoomResponseWithKey()
+	return accepted
+}
+
+func (tc *testClient) expectJoinRoomResponseWithKey() (accepted int, ownerClientId string, ownerPublicKey []byte) {
+	tc.t.Helper()
 	message := tc.readMessage()
 	if message.Command() != protocol.CommandJoinRoom|protocol.CommandResponseMask {
 		tc.t.Fatalf("expected a join room response, got %x", message.Command())
@@ -177,7 +199,7 @@ func (tc *testClient) expectJoinRoomResponse() int {
 	if err != nil {
 		tc.t.Fatalf("GetPayloadConnectRoomResponse failed: %s", err)
 	}
-	return payload.Accepted
+	return payload.Accepted, payload.ClientId, payload.PublicKey
 }
 
 func (tc *testClient) sendAdbTransport(raw []byte) {
@@ -221,6 +243,77 @@ func TestCreateAndJoinRoomAccepted(t *testing.T) {
 
 	roomId := owner.createRoom()
 	joinRoomAndAccept(t, owner, guest, roomId)
+}
+
+// TestJoinRoomForwardsIdentitiesBothWays confirms the transporter carries
+// each side's public key to the other: the guest's key arrives with the
+// join request (already covered by joinRoomAndAccept's guestClientId
+// check), and the owner's key arrives with the join response, tagged with
+// the owner's client id (which the owner itself never sends — the
+// transporter fills it in from the connection it already knows).
+func TestJoinRoomForwardsIdentitiesBothWays(t *testing.T) {
+	address := startTestSystem(t)
+	owner := dialTestClient(t, address)
+	guest := dialTestClient(t, address)
+
+	roomId := owner.createRoom()
+
+	guestPublicKey := []byte{0x01, 0x02, 0x03}
+	guest.joinRoomWithKey(roomId, guestPublicKey)
+	_, guestClientId, receivedGuestKey := owner.expectJoinRoomRequestWithKey()
+	if guestClientId != guest.clientId {
+		t.Fatalf("expected the guest's client id %q in the join request, got %q", guest.clientId, guestClientId)
+	}
+	if string(receivedGuestKey) != string(guestPublicKey) {
+		t.Fatalf("expected the owner to receive the guest's public key %x, got %x", guestPublicKey, receivedGuestKey)
+	}
+
+	ownerPublicKey := []byte{0xaa, 0xbb, 0xcc}
+	owner.respondToJoinRoomWithKey(1, ownerPublicKey)
+	accepted, ownerClientId, receivedOwnerKey := guest.expectJoinRoomResponseWithKey()
+	if accepted != 1 {
+		t.Fatalf("expected the join request to be accepted")
+	}
+	if ownerClientId != owner.clientId {
+		t.Fatalf("expected the guest to receive the owner's client id %q, got %q", owner.clientId, ownerClientId)
+	}
+	if string(receivedOwnerKey) != string(ownerPublicKey) {
+		t.Fatalf("expected the guest to receive the owner's public key %x, got %x", ownerPublicKey, receivedOwnerKey)
+	}
+}
+
+// TestSecondGuestIsRejected is a regression test for the invariant that a
+// room has exactly one owner and one guest: a second guest trying to join
+// an already-occupied room must be rejected, not silently replace the
+// first guest.
+func TestSecondGuestIsRejected(t *testing.T) {
+	address := startTestSystem(t)
+	owner := dialTestClient(t, address)
+	guest1 := dialTestClient(t, address)
+	guest2 := dialTestClient(t, address)
+
+	roomId := owner.createRoom()
+	joinRoomAndAccept(t, owner, guest1, roomId)
+
+	guest2.joinRoom(roomId)
+	response := guest2.readMessage()
+	if !response.IsError() {
+		t.Fatalf("expected an error response for a second guest joining an occupied room")
+	}
+	payload, err := response.GetErrorPayload()
+	if err != nil {
+		t.Fatalf("GetErrorPayload failed: %s", err)
+	}
+	if payload.ErrorCode != protocol.ErrorFull {
+		t.Fatalf("expected error code %d, got %d", protocol.ErrorFull, payload.ErrorCode)
+	}
+
+	// The first guest's room membership must be unaffected.
+	guestToOwner := []byte("still connected")
+	guest1.sendAdbTransport(guestToOwner)
+	if received := owner.expectAdbTransport(); string(received) != string(guestToOwner) {
+		t.Fatalf("expected the first guest to remain in the room, got %q", received)
+	}
 }
 
 func TestJoinRoomDeclined(t *testing.T) {

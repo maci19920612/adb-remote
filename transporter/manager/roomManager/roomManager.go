@@ -84,7 +84,7 @@ func (rm *RoomManager) dispatchMessage(messageContainer *connectionManager.Clien
 			}
 			return
 		}
-		rm.handleJoinRoom(sender, payload.RoomId)
+		rm.handleJoinRoom(sender, payload.RoomId, payload.PublicKey)
 	case protocol.CommandJoinRoom | protocol.CommandResponseMask:
 		payload, err := message.GetPayloadConnectRoomResponse()
 		if err != nil {
@@ -94,7 +94,7 @@ func (rm *RoomManager) dispatchMessage(messageContainer *connectionManager.Clien
 			}
 			return
 		}
-		rm.handleJoinRoomResponse(sender, payload.Accepted)
+		rm.handleJoinRoomResponse(sender, payload.Accepted, payload.PublicKey)
 	case protocol.CommandAdbTransport:
 		rm.handleAdbTransport(sender, message)
 	default:
@@ -129,7 +129,7 @@ func (rm *RoomManager) handleCreateRoom(sender *connectionManager.ClientConnecti
 	logger.Info(fmt.Sprintf("%p (%s): Room created: %s", sender, sender.GetClientId(), roomId))
 }
 
-func (rm *RoomManager) handleJoinRoom(sender *connectionManager.ClientConnection, roomId string) {
+func (rm *RoomManager) handleJoinRoom(sender *connectionManager.ClientConnection, roomId string, guestPublicKey []byte) {
 	logger := rm.logger
 	logger.Info(fmt.Sprintf("%p (%s): Join room request: %s", sender, sender.GetClientId(), roomId))
 
@@ -147,9 +147,18 @@ func (rm *RoomManager) handleJoinRoom(sender *connectionManager.ClientConnection
 		return
 	}
 
+	if targetRoom.guest != nil {
+		logger.Error(fmt.Sprintf("%p (%s): Client can't join room %s: it already has a guest", sender, sender.GetClientId(), roomId))
+		if err := sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorFull, "This room already has a guest; only one guest is allowed per room"); err != nil {
+			logger.Error(fmt.Sprintf("%p (%s): Error during the error response sending: %s", sender, sender.GetClientId(), err))
+			_ = sender.Close()
+		}
+		return
+	}
+
 	targetRoom.guest = sender
 	owner := targetRoom.owner
-	if err := owner.SendJoinRoomRequest(roomId, sender.GetClientId()); err != nil {
+	if err := owner.SendJoinRoomRequest(roomId, sender.GetClientId(), guestPublicKey); err != nil {
 		logger.Error(fmt.Sprintf("%p (%s): Error during the join room request sending to the room owner: %s", owner, owner.GetClientId(), err))
 		if err := sender.SendErrorResponse(protocol.CommandJoinRoom, protocol.ErrorUnknown, "Couldn't send the join request to the room owner, closing down the room"); err != nil {
 			logger.Error(fmt.Sprintf("%p (%s): Error sending the failure notice to the guest: %s", sender, sender.GetClientId(), err))
@@ -158,7 +167,7 @@ func (rm *RoomManager) handleJoinRoom(sender *connectionManager.ClientConnection
 	}
 }
 
-func (rm *RoomManager) handleJoinRoomResponse(sender *connectionManager.ClientConnection, isAccepted int) {
+func (rm *RoomManager) handleJoinRoomResponse(sender *connectionManager.ClientConnection, isAccepted int, ownerPublicKey []byte) {
 	logger := rm.logger
 	logger.Info(fmt.Sprintf("%p (%s): Handle join room response", sender, sender.GetClientId()))
 
@@ -181,7 +190,7 @@ func (rm *RoomManager) handleJoinRoomResponse(sender *connectionManager.ClientCo
 		return
 	}
 
-	if err := targetRoom.guest.SendJoinRoomResponse(isAccepted); err != nil {
+	if err := targetRoom.guest.SendJoinRoomResponse(isAccepted, sender.GetClientId(), ownerPublicKey); err != nil {
 		logger.Error(fmt.Sprintf("%p (%s): Error during the response sending to the guest", sender, sender.GetClientId()))
 		_ = targetRoom.guest.Close()
 		targetRoom.guest = nil

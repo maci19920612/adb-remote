@@ -205,7 +205,7 @@ func (cc *ClientConnection) SendRoomCreateResponse(roomId string) error {
 	return message.Write(cc.connection)
 }
 
-func (cc *ClientConnection) SendJoinRoomRequest(roomId string, clientId string) error {
+func (cc *ClientConnection) SendJoinRoomRequest(roomId string, clientId string, guestPublicKey []byte) error {
 	pool := cc.owner.transporterMessagePool
 	container := pool.Obtain()
 	defer container.Dispose()
@@ -215,15 +215,21 @@ func (cc *ClientConnection) SendJoinRoomRequest(roomId string, clientId string) 
 	}
 	message.SetDirectCommand(protocol.CommandJoinRoom)
 	if err := message.SetPayloadConnectRoom(&protocol.TransporterMessagePayloadConnectRoom{
-		RoomId:   roomId,
-		ClientId: clientId,
+		RoomId:    roomId,
+		ClientId:  clientId,
+		PublicKey: guestPublicKey,
 	}); err != nil {
 		return err
 	}
 	return message.Write(cc.connection)
 }
 
-func (cc *ClientConnection) SendJoinRoomResponse(isAccepted int) error {
+// SendJoinRoomResponse forwards the room owner's accept/decline decision to
+// this (guest) connection. ownerClientId and ownerPublicKey identify the
+// owner (see client/identity) so the guest can display the owner's
+// fingerprint for out-of-band verification; they are meaningful only when
+// isAccepted is non-zero.
+func (cc *ClientConnection) SendJoinRoomResponse(isAccepted int, ownerClientId string, ownerPublicKey []byte) error {
 	pool := cc.owner.transporterMessagePool
 	container := pool.Obtain()
 	defer container.Dispose()
@@ -233,7 +239,9 @@ func (cc *ClientConnection) SendJoinRoomResponse(isAccepted int) error {
 	}
 	message.SetResponseCommand(protocol.CommandJoinRoom)
 	if err := message.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{
-		Accepted: isAccepted,
+		Accepted:  isAccepted,
+		ClientId:  ownerClientId,
+		PublicKey: ownerPublicKey,
 	}); err != nil {
 		return err
 	}
