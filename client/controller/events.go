@@ -20,11 +20,12 @@ const (
 // OwnerEvent is emitted by JoinAsRoomOwner to report state changes as they
 // happen; the caller (e.g. a TUI) owns all presentation.
 type OwnerEvent struct {
-	Kind          OwnerEventKind
-	RoomId        string
-	GuestClientId string
-	Accepted      bool
-	Err           error
+	Kind           OwnerEventKind
+	RoomId         string
+	GuestClientId  string
+	GuestPublicKey []byte
+	Accepted       bool
+	Err            error
 }
 
 // OwnerEventFunc receives OwnerEvents. It must not block for long: it is

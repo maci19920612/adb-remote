@@ -10,8 +10,10 @@ import (
 )
 
 // AcceptPromptFunc decides whether a room join request from guestClientId
-// should be accepted.
-type AcceptPromptFunc func(guestClientId string) (accepted bool, err error)
+// should be accepted. guestPublicKey is the guest's identity public key (see
+// client/identity); the caller should display its fingerprint so the
+// operator can verify it out of band before accepting.
+type AcceptPromptFunc func(guestClientId string, guestPublicKey []byte) (accepted bool, err error)
 
 // JoinAsRoomOwner creates a room sharing deviceId, then services the room
 // for its whole lifetime: every ADB stream a guest opens is relayed via a
@@ -71,21 +73,21 @@ func dispatchOwnerMessage(client *transportLayer.Client, multiplexer *relay.Owne
 			}
 			return
 		}
-		emitOwner(onEvent, OwnerEvent{Kind: OwnerJoinRequested, GuestClientId: payload.ClientId})
+		emitOwner(onEvent, OwnerEvent{Kind: OwnerJoinRequested, GuestClientId: payload.ClientId, GuestPublicKey: payload.PublicKey})
 		// promptAccept commonly blocks on user input; run it off the
 		// dispatch loop so an already-connected guest's ADB traffic keeps
 		// flowing while the operator decides.
-		go handleJoinRequest(client, promptAccept, onEvent, payload.ClientId)
+		go handleJoinRequest(client, promptAccept, onEvent, payload.ClientId, payload.PublicKey)
 	default:
 		defer container.Dispose()
 		logger.Info(fmt.Sprintf("Ignoring unexpected message, command: %x", message.Command()))
 	}
 }
 
-func handleJoinRequest(client *transportLayer.Client, promptAccept AcceptPromptFunc, onEvent OwnerEventFunc, guestClientId string) {
+func handleJoinRequest(client *transportLayer.Client, promptAccept AcceptPromptFunc, onEvent OwnerEventFunc, guestClientId string, guestPublicKey []byte) {
 	logger := client.Logger
 
-	accepted, err := promptAccept(guestClientId)
+	accepted, err := promptAccept(guestClientId, guestPublicKey)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Error while deciding whether to accept the join request from %s: %s", guestClientId, err))
 		emitOwner(onEvent, OwnerEvent{Kind: OwnerJoinFailed, GuestClientId: guestClientId, Err: err})

@@ -3,6 +3,7 @@ package tui
 import (
 	"adb-remote.maci.team/client/adb"
 	"adb-remote.maci.team/client/controller"
+	"adb-remote.maci.team/client/identity"
 	"adb-remote.maci.team/client/transportLayer"
 	"context"
 	"fmt"
@@ -42,8 +43,9 @@ type shareModel struct {
 	clientId string
 	roomId   string
 
-	pendingGuestId string
-	pendingRespond chan<- bool
+	pendingGuestId     string
+	pendingFingerprint string
+	pendingRespond     chan<- bool
 
 	activity []string
 }
@@ -101,12 +103,12 @@ func runOwnerFlow(ctx context.Context, program *tea.Program, m *shareModel, clie
 	}
 	program.Send(clientIdMsg(clientId))
 
-	promptAccept := func(guestClientId string) (bool, error) {
+	promptAccept := func(guestClientId string, guestPublicKey []byte) (bool, error) {
 		if autoAccept {
 			return true, nil
 		}
 		respond := make(chan bool, 1)
-		program.Send(joinRequestMsg{clientId: guestClientId, respond: respond})
+		program.Send(joinRequestMsg{clientId: guestClientId, fingerprint: identity.Fingerprint(guestPublicKey), respond: respond})
 		select {
 		case accepted := <-respond:
 			return accepted, nil
@@ -135,8 +137,9 @@ type clientIdMsg string
 type ownerEventMsg controller.OwnerEvent
 
 type joinRequestMsg struct {
-	clientId string
-	respond  chan<- bool
+	clientId    string
+	fingerprint string
+	respond     chan<- bool
 }
 
 type shareErrorMsg struct{ err error }
@@ -177,6 +180,7 @@ func (m *shareModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case joinRequestMsg:
 		m.pendingGuestId = msg.clientId
+		m.pendingFingerprint = msg.fingerprint
 		m.pendingRespond = msg.respond
 		return m, nil
 	case shareErrorMsg:
@@ -198,10 +202,12 @@ func (m *shareModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.pendingRespond <- true
 			m.pendingRespond = nil
 			m.pendingGuestId = ""
+			m.pendingFingerprint = ""
 		case "n":
 			m.pendingRespond <- false
 			m.pendingRespond = nil
 			m.pendingGuestId = ""
+			m.pendingFingerprint = ""
 		}
 		return m, nil
 	}
@@ -242,7 +248,7 @@ func (m *shareModel) handleOwnerEvent(e controller.OwnerEvent) {
 		m.roomId = e.RoomId
 		m.stage = shareStageRoomActive
 	case controller.OwnerJoinRequested:
-		m.appendActivity(fmt.Sprintf("Join request from clientId: %s", e.GuestClientId))
+		m.appendActivity(fmt.Sprintf("Join request from clientId: %s (fingerprint %s)", e.GuestClientId, identity.Fingerprint(e.GuestPublicKey)))
 	case controller.OwnerJoinDecided:
 		verb := "declined"
 		if e.Accepted {
@@ -292,7 +298,9 @@ func (m *shareModel) View() string {
 		}
 		b.WriteString(labelStyle.Render("Room id:        ") + successStyle.Render(m.roomId) + "\n\n")
 		if m.pendingRespond != nil {
-			b.WriteString(promptStyle.Render(fmt.Sprintf("Join request from clientId: %s — accept? [y/n]", m.pendingGuestId)) + "\n\n")
+			b.WriteString(promptStyle.Render(fmt.Sprintf("Join request from clientId: %s — accept? [y/n]", m.pendingGuestId)) + "\n")
+			b.WriteString(labelStyle.Render("  Guest fingerprint: ") + m.pendingFingerprint + "\n")
+			b.WriteString(dimStyle.Render("  Verify this matches the guest's own displayed fingerprint out of band before accepting.") + "\n\n")
 		} else {
 			b.WriteString(dimStyle.Render("Waiting for guests to join...") + "\n\n")
 		}
