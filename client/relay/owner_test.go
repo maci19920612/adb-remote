@@ -4,23 +4,31 @@ import (
 	"adb-remote.maci.team/client/adb"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
 // fakeOwnerSmartSocket hands out a preconfigured net.Conn per requested
-// service, or a configured error.
+// service, or a configured error, and records every requested service.
 type fakeOwnerSmartSocket struct {
 	adb.IAdbSmartSocket
 
 	mu        sync.Mutex
 	byService map[string]net.Conn
+	// byPrefix serves services whose exact text isn't known up front (e.g.
+	// a reverse forward rewritten to name an ephemeral port).
+	byPrefix  map[string]func() net.Conn
+	requested []string
 	err       error
 }
 
 func newFakeOwnerSmartSocket() *fakeOwnerSmartSocket {
-	return &fakeOwnerSmartSocket{byService: make(map[string]net.Conn)}
+	return &fakeOwnerSmartSocket{
+		byService: make(map[string]net.Conn),
+		byPrefix:  make(map[string]func() net.Conn),
+	}
 }
 
 func (f *fakeOwnerSmartSocket) withStream(service string, conn net.Conn) *fakeOwnerSmartSocket {
@@ -30,17 +38,35 @@ func (f *fakeOwnerSmartSocket) withStream(service string, conn net.Conn) *fakeOw
 	return f
 }
 
+func (f *fakeOwnerSmartSocket) withStreamPrefix(prefix string, newConn func() net.Conn) *fakeOwnerSmartSocket {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.byPrefix[prefix] = newConn
+	return f
+}
+
+func (f *fakeOwnerSmartSocket) requestedServices() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.requested...)
+}
+
 func (f *fakeOwnerSmartSocket) OpenStream(targetSerial string, service string) (net.Conn, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.requested = append(f.requested, service)
 	if f.err != nil {
 		return nil, f.err
 	}
-	conn, ok := f.byService[service]
-	if !ok {
-		return nil, errors.New("no fake stream configured for service " + service)
+	if conn, ok := f.byService[service]; ok {
+		return conn, nil
 	}
-	return conn, nil
+	for prefix, newConn := range f.byPrefix {
+		if strings.HasPrefix(service, prefix) {
+			return newConn(), nil
+		}
+	}
+	return nil, errors.New("no fake stream configured for service " + service)
 }
 
 // TestOwnerMultiplexerOpenFailureSendsClose exercises the case where the

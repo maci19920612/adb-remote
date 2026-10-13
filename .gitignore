@@ -11,3 +11,10 @@
 
 # Generated transporter TLS identity (self-signed, created on first run)
 *.pem
+
+# Local runtime config (copy from config.example.json)
+/client/config.json
+/transporter/config.json
+
+# macOS
+.DS_Store
