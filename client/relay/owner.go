@@ -34,8 +34,14 @@ var adbMessagePool = utils.NewObjectPool(adb.CreateMessage)
 // receiver uses for it (0 until the receiver has assigned one, i.e. before
 // OPEN is acknowledged).
 type ownerStream struct {
-	guestId uint32 // the id the guest assigned this stream (arg1 in its OPEN)
+	guestId uint32 // the id the guest assigned this stream (arg1 in its OPEN, or in its OKAY to ours)
 	ownId   uint32 // the id we assigned this stream
+
+	// awaitingGuest marks a stream we opened towards the guest (a device
+	// connection through a reverse forward, see reverse.go) whose OPEN the
+	// guest hasn't acknowledged yet, so guestId isn't known. Only the
+	// dispatch goroutine reads or clears it once the stream is registered.
+	awaitingGuest bool
 
 	conn net.Conn
 	// sendPermit is a buffered(1) token: present means we may send the
@@ -54,6 +60,9 @@ type ownerStream struct {
 // since real adb-server does not expose a raw device transport pass-through
 // (see relay.go's package doc and the README for why).
 //
+// Reverse forwards are the exception, where the device opens streams
+// towards the guest instead; see reverse.go.
+//
 // A single OwnerMultiplexer is meant to live for the whole room, across
 // however many guest sessions come and go: Dispatch only consumes
 // CommandAdbTransport messages, so it composes with a caller that also
@@ -67,17 +76,19 @@ type OwnerMultiplexer struct {
 
 	nextId uint32 // atomic; monotonically increasing, never reused
 
-	mu      sync.Mutex
-	streams map[uint32]*ownerStream
+	mu              sync.Mutex
+	streams         map[uint32]*ownerStream
+	reverseForwards map[string]*reverseForward // keyed by the device-side (remote) socket
 }
 
 func NewOwnerMultiplexer(smartSocket adb.IAdbSmartSocket, deviceId string, client TransportClient, logger *slog.Logger) *OwnerMultiplexer {
 	return &OwnerMultiplexer{
-		smartSocket: smartSocket,
-		deviceId:    deviceId,
-		client:      client,
-		logger:      logger,
-		streams:     make(map[uint32]*ownerStream),
+		smartSocket:     smartSocket,
+		deviceId:        deviceId,
+		client:          client,
+		logger:          logger,
+		streams:         make(map[uint32]*ownerStream),
+		reverseForwards: make(map[string]*reverseForward),
 	}
 }
 
@@ -138,7 +149,7 @@ func (m *OwnerMultiplexer) Dispatch(container *transportLayer.MessageContainer) 
 	case adb.CommandWrite:
 		m.handleWrite(adbMessage.Arg1(), adbMessage.Arg2(), adbMessage.Data())
 	case adb.CommandOkay:
-		m.handleOkay(adbMessage.Arg2())
+		m.handleOkay(adbMessage.Arg1(), adbMessage.Arg2())
 	case adb.CommandClose:
 		m.handleClose(adbMessage.Arg2())
 	default:
@@ -146,8 +157,12 @@ func (m *OwnerMultiplexer) Dispatch(container *transportLayer.MessageContainer) 
 	}
 }
 
-// Close closes every currently open stream.
+// Close removes every reverse forward from the device and closes every
+// currently open stream.
 func (m *OwnerMultiplexer) Close() {
+	for _, forward := range m.removeAllReverseForwards() {
+		m.killReverseForwardOnDevice(forward.remote)
+	}
 	m.closeAllStreams()
 }
 
@@ -159,7 +174,7 @@ func (m *OwnerMultiplexer) handleOpen(guestId uint32, rawService string) {
 	logger := m.logger
 	logger.Info(fmt.Sprintf("Guest opened a stream (id=%d): %s", guestId, service))
 
-	conn, err := m.smartSocket.OpenStream(m.deviceId, service)
+	conn, err := m.openDeviceStream(service)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Failed to open service %q on the local device: %s", service, err))
 		if sendErr := m.sendClose(0, guestId); sendErr != nil {
@@ -207,9 +222,17 @@ func (m *OwnerMultiplexer) handleWrite(guestId uint32, ownId uint32, data []byte
 	}
 }
 
-func (m *OwnerMultiplexer) handleOkay(ownId uint32) {
+func (m *OwnerMultiplexer) handleOkay(guestId uint32, ownId uint32) {
 	stream := m.lookup(ownId)
 	if stream == nil {
+		return
+	}
+	if stream.awaitingGuest {
+		// The guest accepted a stream we opened; now that its id is
+		// known, relaying can start.
+		stream.awaitingGuest = false
+		stream.guestId = guestId
+		go m.pumpDeviceToGuest(stream)
 		return
 	}
 	select {
@@ -291,6 +314,20 @@ func (m *OwnerMultiplexer) closeAllStreams() {
 	for _, stream := range streams {
 		m.closeStream(stream, false)
 	}
+}
+
+func (m *OwnerMultiplexer) sendOpen(ownId uint32, destination string) error {
+	container := adbMessagePool.Obtain()
+	defer container.Dispose()
+	message, err := container.Data()
+	if err != nil {
+		return err
+	}
+	// NUL-terminated, the way adbd sends it.
+	if err := message.Set(adb.CommandOpen, ownId, 0, append([]byte(destination), 0)); err != nil {
+		return err
+	}
+	return m.client.SendAdbMessage(message)
 }
 
 func (m *OwnerMultiplexer) sendOkay(ownId uint32, guestId uint32) error {

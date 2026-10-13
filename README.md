@@ -213,6 +213,17 @@ the `sync:` protocol and multi-chunk flow control), and several concurrent
   a join request (the TUI's y/n prompt, or `--yes`) runs off the main
   dispatch loop so it can't stall an already-connected guest's traffic —
   see `TestJoinRequestDoesNotBlockActiveStreamTraffic`.
+- **Reverse forwards** (`adb reverse`, which scrcpy and Android Studio's
+  device mirroring use to have the device connect back to the host):
+  verified with scrcpy 3.3.3 against a real device, with the owner's
+  adb-server sandboxed so it can't reach the guest's listeners, as when
+  owner and guest are two machines. The owner can't pass
+  `reverse:forward:<remote>;<local>` through unchanged, since its own
+  adb-server would then connect to `<local>` on the owner's machine. So
+  `client/relay/reverse.go` points the device at an owner-side relay port
+  instead and hands each connection arriving there to the guest as a
+  device-initiated `OPEN` for the original `<local>`, which the guest's
+  adb-server connects to itself.
 - **The TUI itself**: verified with a real two-process, real-terminal (PTY)
   run — device list → refresh → select → room id, a real guest joining
   with its client id shown and accepted, and the guest side showing its

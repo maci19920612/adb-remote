@@ -66,11 +66,12 @@ func JoinAsGuest(ctx context.Context, client *transportLayer.Client, smartSocket
 			return ctx.Err()
 		case container, ok := <-client.Messages():
 			// While idle (no active relay), nothing should legitimately
-			// arrive here — the guest is always the one opening ADB
-			// streams. This case exists to notice the channel closing,
-			// meaning the connection to the transporter (and so to the
-			// room owner) is gone; anything else received is logged and
-			// discarded.
+			// arrive here — ADB streams only exist while a local adb
+			// server is connected (the owner only opens one itself for a
+			// reverse forward that server requested). This case exists
+			// to notice the channel closing, meaning the connection to
+			// the transporter (and so to the room owner) is gone;
+			// anything else received is logged and discarded.
 			if !ok {
 				logger.Info("Transporter connection lost while idle")
 				emitGuest(onEvent, GuestEvent{Kind: GuestTransportLost})
