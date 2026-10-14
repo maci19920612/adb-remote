@@ -3,10 +3,12 @@ package connectionManager
 import (
 	"adb-remote.maci.team/shared/protocol"
 	"adb-remote.maci.team/transporter/config"
+	"bytes"
 	"crypto/tls"
 	"io"
 	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -29,13 +31,22 @@ func freeLocalAddress(t *testing.T) string {
 
 func startTestServer(t *testing.T) (*ConnectionManager, string) {
 	t.Helper()
+	return startTestServerWith(t, func(*config.TransporterConfiguration) {})
+}
+
+// startTestServerWith starts a server whose configuration configure may
+// adjust (e.g. to turn on debug verbosity) before it starts.
+func startTestServerWith(t *testing.T, configure func(*config.TransporterConfiguration)) (*ConnectionManager, string) {
+	t.Helper()
 	address := freeLocalAddress(t)
 	dir := t.TempDir()
-	cm := CreateConnectionManager(&config.TransporterConfiguration{
+	transporterConfig := &config.TransporterConfiguration{
 		Address:     address,
 		TLSCertFile: filepath.Join(dir, "cert.pem"),
 		TLSKeyFile:  filepath.Join(dir, "key.pem"),
-	}, newTestLogger())
+	}
+	configure(transporterConfig)
+	cm := CreateConnectionManager(transporterConfig, newTestLogger())
 
 	started := make(chan struct{})
 	go func() {
@@ -204,4 +215,126 @@ func TestMessagesAfterHandshakeArriveOnClientMessageChannel(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for the message on ClientMessageChannel")
 	}
+}
+
+// startDebugTestServer starts a server with debug verbosity, capturing to a
+// file whose path it returns alongside the usual server handles.
+func startDebugTestServer(t *testing.T) (*ConnectionManager, string, string) {
+	t.Helper()
+	pcapPath := filepath.Join(t.TempDir(), "transporter.pcapng")
+	cm, address := startTestServerWith(t, func(c *config.TransporterConfiguration) {
+		c.Verbosity = config.VerbosityDebug
+		c.PcapFile = pcapPath
+	})
+	return cm, address, pcapPath
+}
+
+func readCapture(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("failed to read the capture file: %s", err)
+	}
+	return data
+}
+
+func waitForServerClose(t *testing.T, conn net.Conn) {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.Copy(io.Discard, conn); err != nil {
+		t.Fatalf("expected the server to close the connection, got %s", err)
+	}
+}
+
+func TestDebugVerbosityCapturesTrafficFromNonTLSClients(t *testing.T) {
+	cm, address, pcapPath := startDebugTestServer(t)
+
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		t.Fatalf("failed to dial the server: %s", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("HELLO NOT TLS\r\n\r\n")); err != nil {
+		t.Fatalf("failed to write: %s", err)
+	}
+	waitForServerClose(t, conn)
+	cm.Stop()
+
+	if !bytes.Contains(readCapture(t, pcapPath), []byte("HELLO NOT TLS")) {
+		t.Fatalf("expected the plaintext bytes of the failed TLS handshake in the capture")
+	}
+}
+
+func TestDebugVerbosityCapturesTLSHandshakeAndSecrets(t *testing.T) {
+	cm, address, pcapPath := startDebugTestServer(t)
+
+	conn, err := tls.Dial("tcp", address, &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("failed to dial the server: %s", err)
+	}
+	defer conn.Close()
+	performHandshake(t, conn)
+	cm.Stop()
+
+	capture := readCapture(t, pcapPath)
+	if !containsClientHello(capture) {
+		t.Fatalf("expected the raw TLS ClientHello in the capture")
+	}
+	if !bytes.Contains(capture, []byte("CLIENT_TRAFFIC_SECRET_0 ")) {
+		t.Fatalf("expected the TLS session secrets in the capture")
+	}
+}
+
+func TestDefaultVerbosityDoesNotCapture(t *testing.T) {
+	pcapPath := filepath.Join(t.TempDir(), "transporter.pcapng")
+	cm, address := startTestServerWith(t, func(c *config.TransporterConfiguration) {
+		c.PcapFile = pcapPath
+	})
+
+	conn, err := tls.Dial("tcp", address, &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatalf("failed to dial the server: %s", err)
+	}
+	defer conn.Close()
+	performHandshake(t, conn)
+	cm.Stop()
+
+	if _, err := os.Stat(pcapPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no capture file without debug verbosity, got err=%v", err)
+	}
+}
+
+func TestStartServerFailsWhenTheCaptureCannotBeCreated(t *testing.T) {
+	dir := t.TempDir()
+	cm := CreateConnectionManager(&config.TransporterConfiguration{
+		Address:     freeLocalAddress(t),
+		TLSCertFile: filepath.Join(dir, "cert.pem"),
+		TLSKeyFile:  filepath.Join(dir, "key.pem"),
+		Verbosity:   config.VerbosityDebug,
+		PcapFile:    filepath.Join(dir, "missing-dir", "transporter.pcapng"),
+	}, newTestLogger())
+
+	result := make(chan error, 1)
+	go func() { result <- cm.StartServer() }()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatalf("expected StartServer to fail when the capture file can't be created")
+		}
+	case <-time.After(2 * time.Second):
+		cm.Stop()
+		t.Fatalf("expected StartServer to fail when the capture file can't be created, but it started serving")
+	}
+}
+
+// containsClientHello looks for a TLS handshake record header (content type
+// 22, legacy version 3.x) whose first handshake message is a ClientHello
+// (type 1).
+func containsClientHello(data []byte) bool {
+	for i := 0; i+5 < len(data); i++ {
+		if data[i] == 0x16 && data[i+1] == 0x03 && data[i+5] == 0x01 {
+			return true
+		}
+	}
+	return false
 }

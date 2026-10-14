@@ -50,6 +50,31 @@ go run .
 # or: ./transporter   (after `go build`)
 ```
 
+### Debug packet capture
+
+Set `"verbosity": "debug"` (default: `"default"`) to turn on debug logging
+and record every byte of every connection to a pcapng file:
+
+```json
+{
+  "transporterAddress": "0.0.0.0:9000",
+  "verbosity": "debug",
+  "pcapFile": "transporter.pcapng"
+}
+```
+
+`pcapFile` is optional and defaults to `transporter.pcapng` in the working
+directory; the file is overwritten on every start. The capture is taken
+below TLS, so it also shows connections whose TLS handshake failed and
+clients that never spoke TLS at all. Each connection appears as its own TCP
+stream between the real client and transporter addresses, and the TLS
+session secrets are embedded in the file, so Wireshark decrypts the
+successful sessions on open — no key log setup needed.
+
+**The capture holds all relayed traffic and the keys to decrypt it.** It is
+created with mode `0600`; treat it as sensitive and only enable debug
+verbosity while debugging.
+
 ### Running the transporter with Docker/Podman
 
 ```sh
@@ -71,6 +96,10 @@ podman run -d --name adb-remote-transporter \
   -v "$(pwd)/my-config.json:/app/config.json:ro" \
   adb-remote-transporter
 ```
+
+For debug packet capture in a container, point `pcapFile` at a mounted,
+writable directory (e.g. `"pcapFile": "/captures/transporter.pcapng"` with
+`-v "$(pwd)/captures:/captures"`), so the file outlives the container.
 
 ## Running the client
 

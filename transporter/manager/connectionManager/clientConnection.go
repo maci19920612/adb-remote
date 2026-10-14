@@ -49,7 +49,7 @@ func (cc *ClientConnection) run() {
 		}
 	}()
 
-	logger.Info(fmt.Sprintf("%p (-): Client connection started", cc))
+	logger.Info(fmt.Sprintf("%p (-): Client connection started from %s", cc, cc.connection.RemoteAddr()))
 
 	if !cc.performHandshake() {
 		return

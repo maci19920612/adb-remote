@@ -73,3 +73,58 @@ func TestCreateConfigParsesTLSPaths(t *testing.T) {
 		t.Fatalf("expected TLS paths a.pem/b.pem, got %q/%q", config.CertPath(), config.KeyPath())
 	}
 }
+
+func TestCreateConfigVerbosityDefaultsWhenOmitted(t *testing.T) {
+	path := writeConfigFile(t, `{"transporterAddress": "0.0.0.0:9000"}`)
+	config, err := CreateConfig(path)
+	if err != nil {
+		t.Fatalf("CreateConfig failed: %s", err)
+	}
+	if config.IsDebug() {
+		t.Fatalf("expected debug verbosity to be off when omitted")
+	}
+}
+
+func TestCreateConfigParsesVerbosity(t *testing.T) {
+	for _, testCase := range []struct {
+		verbosity string
+		debug     bool
+	}{
+		{VerbosityDefault, false},
+		{VerbosityDebug, true},
+	} {
+		path := writeConfigFile(t, `{"transporterAddress": "0.0.0.0:9000", "verbosity": "`+testCase.verbosity+`"}`)
+		config, err := CreateConfig(path)
+		if err != nil {
+			t.Fatalf("CreateConfig failed for verbosity %q: %s", testCase.verbosity, err)
+		}
+		if config.IsDebug() != testCase.debug {
+			t.Fatalf("expected IsDebug()=%t for verbosity %q", testCase.debug, testCase.verbosity)
+		}
+	}
+}
+
+func TestCreateConfigRejectsUnknownVerbosity(t *testing.T) {
+	path := writeConfigFile(t, `{"transporterAddress": "0.0.0.0:9000", "verbosity": "Debug"}`)
+	if _, err := CreateConfig(path); err == nil {
+		t.Fatalf("expected an error for an unknown verbosity value")
+	}
+}
+
+func TestPcapPathDefault(t *testing.T) {
+	config := &TransporterConfiguration{Address: "0.0.0.0:9000"}
+	if config.PcapPath() != DefaultPcapFile {
+		t.Fatalf("expected the default pcap path %q, got %q", DefaultPcapFile, config.PcapPath())
+	}
+}
+
+func TestCreateConfigParsesPcapFile(t *testing.T) {
+	path := writeConfigFile(t, `{"transporterAddress": "0.0.0.0:9000", "pcapFile": "/captures/t.pcapng"}`)
+	config, err := CreateConfig(path)
+	if err != nil {
+		t.Fatalf("CreateConfig failed: %s", err)
+	}
+	if config.PcapPath() != "/captures/t.pcapng" {
+		t.Fatalf("expected the overridden pcap path, got %q", config.PcapPath())
+	}
+}

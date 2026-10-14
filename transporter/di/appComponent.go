@@ -15,20 +15,29 @@ const ConfigFileName = "config.json"
 
 func CreateContainer() container.Container {
 	cont := container.New()
-	registerLogger(&cont)
+	// The configuration comes first: the logger's level depends on it.
 	registerConfiguration(&cont)
+	registerLogger(&cont)
 	registerConnectionManager(&cont)
 	registerRoomManager(&cont)
 	return cont
 }
 
 func registerLogger(container *container.Container) {
-	err := container.Singleton(func() *slog.Logger {
-		return slog.New(prettyLogHandler.CreatePrettyHandler(os.Stdout, &slog.HandlerOptions{}))
-	})
+	err := container.Singleton(newLogger)
 	if err != nil {
 		panic(err)
 	}
+}
+
+// newLogger logs to stdout at Info level, or at Debug level with debug
+// verbosity.
+func newLogger(configuration *config.TransporterConfiguration) *slog.Logger {
+	level := slog.LevelInfo
+	if configuration.IsDebug() {
+		level = slog.LevelDebug
+	}
+	return slog.New(prettyLogHandler.CreatePrettyHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 }
 
 func registerConfiguration(container *container.Container) {

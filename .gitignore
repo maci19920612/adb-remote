@@ -6,6 +6,7 @@
 # Logs
 *.log
 *.pcap
+*.pcapng
 /logs/
 **/logs/
 

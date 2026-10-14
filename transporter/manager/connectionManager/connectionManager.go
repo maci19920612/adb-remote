@@ -3,6 +3,7 @@ package connectionManager
 import (
 	"adb-remote.maci.team/shared/protocol"
 	"adb-remote.maci.team/shared/utils"
+	"adb-remote.maci.team/transporter/capture"
 	"adb-remote.maci.team/transporter/config"
 	"adb-remote.maci.team/transporter/tlsutil"
 	"container/list"
@@ -31,6 +32,7 @@ type ConnectionManager struct {
 	waitGroup                 *sync.WaitGroup
 	config                    *config.TransporterConfiguration
 	server                    net.Listener
+	capture                   *capture.Capture // nil unless debug verbosity is on
 	connections               *list.List
 	mutex                     *sync.Mutex
 	context                   context.Context
@@ -62,7 +64,9 @@ func CreateConnectionManager(config *config.TransporterConfiguration, logger *sl
 // StartServer starts listening (over TLS, using a self-signed certificate
 // generated on first run and persisted thereafter — see transporter/tlsutil)
 // and blocks until the server is stopped via Stop or the listener fails
-// permanently.
+// permanently. With debug verbosity, every accepted connection is recorded
+// below the TLS layer to the configured pcapng file (see
+// transporter/capture).
 func (cm *ConnectionManager) StartServer() error {
 	logger := cm.logger
 	logger.Info("Starting the transporter server")
@@ -76,13 +80,32 @@ func (cm *ConnectionManager) StartServer() error {
 		logger.Info(fmt.Sprintf("Transporter TLS certificate fingerprint: %s", fingerprint))
 	}
 
-	server, err := tls.Listen("tcp", cm.config.Address, &tls.Config{Certificates: []tls.Certificate{cert}})
+	tlsConfig := &tls.Config{Certificates: []tls.Certificate{cert}}
+	listener, err := net.Listen("tcp", cm.config.Address)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Transporter server can't be created: %s", err))
 		return err
 	}
+
+	var packetCapture *capture.Capture
+	if cm.config.IsDebug() {
+		packetCapture, err = capture.Create(cm.config.PcapPath(), logger)
+		if err != nil {
+			logger.Error(fmt.Sprintf("Transporter packet capture can't be created: %s", err))
+			_ = listener.Close()
+			return err
+		}
+		logger.Warn(fmt.Sprintf("Debug verbosity: recording all traffic, including TLS secrets, to %s", cm.config.PcapPath()))
+		// Wrapping the raw listener (rather than the TLS one) is what lets
+		// the capture see failed handshakes and non-TLS clients too.
+		listener = packetCapture.Listener(listener)
+		tlsConfig.KeyLogWriter = packetCapture.KeyLogWriter()
+	}
+
+	server := tls.NewListener(listener, tlsConfig)
 	cm.mutex.Lock()
 	cm.server = server
+	cm.capture = packetCapture
 	cm.mutex.Unlock()
 
 	cm.waitGroup.Add(1)
@@ -114,12 +137,13 @@ func (cm *ConnectionManager) StartServer() error {
 }
 
 // Stop closes the listener and every registered client connection, causing
-// StartServer to return.
+// StartServer to return, and then the packet capture, if any.
 func (cm *ConnectionManager) Stop() {
 	cm.cancelFunc()
 
 	cm.mutex.Lock()
 	server := cm.server
+	packetCapture := cm.capture
 	connections := make([]*ClientConnection, 0, cm.connections.Len())
 	for element := cm.connections.Front(); element != nil; element = element.Next() {
 		connections = append(connections, element.Value.(*ClientConnection))
@@ -131,6 +155,12 @@ func (cm *ConnectionManager) Stop() {
 	}
 	for _, connection := range connections {
 		_ = connection.Close()
+	}
+	// Closed last, so the connections closed above are still recorded.
+	if packetCapture != nil {
+		if err := packetCapture.Close(); err != nil {
+			cm.logger.Warn(fmt.Sprintf("Error during the packet capture close, silently ignored: %s", err))
+		}
 	}
 }
 
