@@ -1,3 +1,24 @@
 .git
 .idea
+**/.DS_Store
+
+# Local runtime config; the image uses transporter/config.docker.json
 **/config.json
+
+# Secrets, logs and captures a working copy may hold (the transporter's TLS
+# key, debug captures with plaintext ADB traffic)
+**/*.pem
+**/*.log
+**/*.pcap
+**/*.pcapng
+**/logs
+
+# Build outputs and Go test artifacts
+dist
+client/adb-remote-client
+client/client
+transporter/transporter
+**/*.exe
+**/*.test
+**/*.out
+**/*.prof
