@@ -2,6 +2,14 @@
 /client/adb-remote-client
 /client/client
 /transporter/transporter
+*.exe
+# Release builds (see the CI release job)
+/dist/
+
+# Go test binaries, coverage and profiles
+*.test
+*.out
+*.prof
 
 # Logs
 *.log
