@@ -11,6 +11,8 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -41,6 +43,12 @@ func startTestSystem(t *testing.T) string {
 // adjust (e.g. lower a limit) before it starts.
 func startTestSystemWith(t *testing.T, configure func(*config.TransporterConfiguration)) string {
 	t.Helper()
+	return startLoggingTestSystem(t, configure, newTestLogger())
+}
+
+// startLoggingTestSystem is startTestSystemWith logging to logger.
+func startLoggingTestSystem(t *testing.T, configure func(*config.TransporterConfiguration), logger *slog.Logger) string {
+	t.Helper()
 	address := freeLocalAddress(t)
 	dir := t.TempDir()
 	transporterConfig := &config.TransporterConfiguration{
@@ -49,8 +57,8 @@ func startTestSystemWith(t *testing.T, configure func(*config.TransporterConfigu
 		TLSKeyFile:  filepath.Join(dir, "key.pem"),
 	}
 	configure(transporterConfig)
-	cm := connectionManager.CreateConnectionManager(transporterConfig, newTestLogger())
-	rm := CreateRoomManager(cm, transporterConfig, newTestLogger())
+	cm := connectionManager.CreateConnectionManager(transporterConfig, logger)
+	rm := CreateRoomManager(cm, transporterConfig, logger)
 
 	started := make(chan struct{})
 	go func() {
@@ -804,5 +812,49 @@ func TestNonReadingClientDoesNotStallOtherRooms(t *testing.T) {
 			t.Fatalf("expected room B to keep relaying, got %q", received)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// syncBuffer collects log output written from several goroutines.
+type syncBuffer struct {
+	mutex  sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return b.buffer.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mutex.Lock()
+	defer b.mutex.Unlock()
+	return b.buffer.String()
+}
+
+// TestRelayingDoesNotLogEveryMessage keeps the log about connections and
+// rooms: relaying traffic once a room is up writes nothing to it.
+func TestRelayingDoesNotLogEveryMessage(t *testing.T) {
+	logs := &syncBuffer{}
+	address := startLoggingTestSystem(t, func(*config.TransporterConfiguration) {}, slog.New(slog.NewTextHandler(logs, nil)))
+	owner := dialTestClient(t, address)
+	guest := dialTestClient(t, address)
+	joinRoomAndAccept(t, owner, guest, owner.createRoom())
+	// The transporter goes back to reading right after relaying the last
+	// message of the join; give it that moment before taking the baseline.
+	time.Sleep(100 * time.Millisecond)
+	before := logs.String()
+
+	for i := 0; i < 20; i++ {
+		guest.sendAdbTransport([]byte("guest->owner"))
+		owner.expectAdbTransport()
+		owner.sendAdbTransport([]byte("owner->guest"))
+		guest.expectAdbTransport()
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	if logged := strings.TrimPrefix(logs.String(), before); logged != "" {
+		t.Fatalf("expected relaying to log nothing, got:\n%s", logged)
 	}
 }

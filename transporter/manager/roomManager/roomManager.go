@@ -138,7 +138,6 @@ func (rm *RoomManager) dispatchMessage(messageContainer *connectionManager.Clien
 		// its own, and nothing it asked for can be answered any more.
 		return
 	}
-	logger.Info(fmt.Sprintf("RoomManager: %x message received from client: %p", message.Command(), sender))
 	switch message.Command() {
 	case protocol.CommandCreateRoom:
 		rm.handleCreateRoom(sender)

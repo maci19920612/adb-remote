@@ -121,7 +121,6 @@ func (cc *ClientConnection) run() {
 	}
 
 	for {
-		logger.Info(fmt.Sprintf("%p (%s): Waiting for message", cc, cc.GetClientId()))
 		if !cc.readNextMessage() {
 			return
 		}
@@ -245,7 +244,6 @@ func (cc *ClientConnection) readNextMessage() bool {
 		return false
 	}
 
-	logger.Info(fmt.Sprintf("%p (%s): Message received from the client: %x", cc, cc.GetClientId(), message.Command()))
 	select {
 	case cc.owner.ClientMessageChannel <- &ClientMessageContainer{
 		Sender:  cc,
