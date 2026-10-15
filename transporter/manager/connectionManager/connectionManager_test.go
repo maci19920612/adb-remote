@@ -59,24 +59,32 @@ func startTunedTestServer(t *testing.T, configure func(*config.TransporterConfig
 	cm := CreateConnectionManager(transporterConfig, newTestLogger())
 	tune(cm)
 
-	started := make(chan struct{})
-	go func() {
-		// StartServer blocks until Stop is called; poll until the listener
-		// is actually accepting connections before signalling ready.
-		go func() { _ = cm.StartServer() }()
-		for i := 0; i < 100; i++ {
-			if conn, err := net.DialTimeout("tcp", address, 50*time.Millisecond); err == nil {
-				_ = conn.Close()
-				close(started)
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		close(started)
-	}()
-	<-started
+	// StartServer blocks until Stop is called.
+	go func() { _ = cm.StartServer() }()
 	t.Cleanup(cm.Stop)
+	waitUntilListening(t, cm)
 	return cm, address
+}
+
+// waitUntilListening waits until cm's listener exists, from when on the
+// kernel accepts connections to it. Dialing a probe connection instead
+// would leave that connection for the server to accept and count at some
+// later point, which throws off tests that check connection limits.
+func waitUntilListening(t *testing.T, cm *ConnectionManager) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		cm.mutex.Lock()
+		listening := cm.server != nil
+		cm.mutex.Unlock()
+		if listening {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the server didn't start listening")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func performHandshake(t *testing.T, conn net.Conn) string {
@@ -372,7 +380,7 @@ func registeredConnections(cm *ConnectionManager) []*ClientConnection {
 }
 
 // waitForConnectionCount waits until exactly count connections are
-// registered, e.g. for the readiness probe of startTestServer to go away.
+// registered.
 func waitForConnectionCount(t *testing.T, cm *ConnectionManager, count int) []*ClientConnection {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -402,7 +410,6 @@ func expectClosedWithin(t *testing.T, conn net.Conn, limit time.Duration) {
 // ADB traffic — since it never set a payload of its own.
 func TestSendGuestLeftCarriesNoPayload(t *testing.T) {
 	cm, address := startTestServer(t)
-	waitForConnectionCount(t, cm, 0)
 	conn := dialAndHandshake(t, address)
 	owner := waitForConnectionCount(t, cm, 1)[0]
 
@@ -491,10 +498,9 @@ func TestIdleClientStaysConnected(t *testing.T) {
 }
 
 func TestConnectionsPerIPAreLimited(t *testing.T) {
-	cm, address := startTestServerWith(t, func(c *config.TransporterConfiguration) {
+	_, address := startTestServerWith(t, func(c *config.TransporterConfiguration) {
 		c.MaxConnectionsPerIP = 2
 	})
-	waitForConnectionCount(t, cm, 0)
 	dialAndHandshake(t, address)
 	dialAndHandshake(t, address)
 
@@ -506,10 +512,9 @@ func TestConnectionsPerIPAreLimited(t *testing.T) {
 }
 
 func TestConnectionsAreLimitedInTotal(t *testing.T) {
-	cm, address := startTestServerWith(t, func(c *config.TransporterConfiguration) {
+	_, address := startTestServerWith(t, func(c *config.TransporterConfiguration) {
 		c.MaxConnections = 1
 	})
-	waitForConnectionCount(t, cm, 0)
 	dialAndHandshake(t, address)
 
 	conn, err := tls.Dial("tcp", address, &tls.Config{InsecureSkipVerify: true})
@@ -525,7 +530,6 @@ func TestConnectionsAreLimitedInTotal(t *testing.T) {
 // Close must not wait for room on that channel.
 func TestClosingDoesNotBlockOnUndrainedDisconnects(t *testing.T) {
 	cm, address := startTestServer(t)
-	waitForConnectionCount(t, cm, 0)
 	count := cap(cm.ClientDisconnectedChannel) + 1
 	for i := 0; i < count; i++ {
 		dialAndHandshake(t, address)
@@ -574,22 +578,15 @@ func (b *syncBuffer) String() string {
 }
 
 // startLoggingServer starts a server on transporterConfig and returns what
-// it logged by the time it accepts connections.
+// it logged by the time it listens.
 func startLoggingServer(t *testing.T, transporterConfig *config.TransporterConfiguration) string {
 	t.Helper()
 	logs := &syncBuffer{}
 	cm := CreateConnectionManager(transporterConfig, slog.New(slog.NewTextHandler(logs, nil)))
 	go func() { _ = cm.StartServer() }()
 	defer cm.Stop()
-	for i := 0; i < 100; i++ {
-		if conn, err := net.DialTimeout("tcp", transporterConfig.Address, 50*time.Millisecond); err == nil {
-			_ = conn.Close()
-			return logs.String()
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("the server didn't start")
-	return ""
+	waitUntilListening(t, cm)
+	return logs.String()
 }
 
 // TestStartupPrintsTheCertificateFingerprintToPin checks the operator gets
