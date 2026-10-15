@@ -1,3 +1,12 @@
 {
-  "transporterAddress": "0.0.0.0:9000"
+  "transporterAddress": "0.0.0.0:9000",
+  "tlsCertFile": "transporter-cert.pem",
+  "tlsKeyFile": "transporter-key.pem",
+  "verbosity": "default",
+  "pcapFile": "transporter.pcapng",
+  "maxConnections": 1024,
+  "maxConnectionsPerIp": 32,
+  "maxRooms": 512,
+  "maxRoomsPerIp": 8,
+  "roomIdleTimeout": "24h"
 }

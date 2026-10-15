@@ -1,3 +1,4 @@
 {
-  "transporterAddress": "127.0.0.1:9000"
+  "transporterAddress": "127.0.0.1:9000",
+  "transporterCertificateFingerprint": ""
 }

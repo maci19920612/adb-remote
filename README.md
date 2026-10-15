@@ -35,20 +35,18 @@ cd client      && go build -o adb-remote-client .
 
 ## Running the transporter
 
-The transporter reads `config.json` from its current working directory:
-
-```json
-{ "transporterAddress": "0.0.0.0:9000" }
-```
-
-`transporterAddress` here is the **listen** address.
-
-Optional limits keep one client (or everyone together) from tying up the
-transporter; the defaults are shown:
+The transporter reads `config.json` from its current working directory.
+`transporter/config.example.json` lists every setting with its default
+value, so it can be copied as is and trimmed down to `transporterAddress`
+without changing anything:
 
 ```json
 {
   "transporterAddress": "0.0.0.0:9000",
+  "tlsCertFile": "transporter-cert.pem",
+  "tlsKeyFile": "transporter-key.pem",
+  "verbosity": "default",
+  "pcapFile": "transporter.pcapng",
   "maxConnections": 1024,
   "maxConnectionsPerIp": 32,
   "maxRooms": 512,
@@ -57,10 +55,23 @@ transporter; the defaults are shown:
 }
 ```
 
-`roomIdleTimeout` closes a room that goes that long without an accepted
-guest (`"0"` disables it). On top of these, a client gets 10 seconds for the
-TLS handshake and the protocol handshake, 60 seconds to finish a message
-once it started sending one, and 30 seconds for every write the transporter
+| Setting | Default | Meaning |
+|---|---|---|
+| `transporterAddress` | required | The address to **listen** on. |
+| `tlsCertFile`, `tlsKeyFile` | `transporter-cert.pem`, `transporter-key.pem` | The TLS certificate and key, generated on the first start (see below). Relative paths are relative to the working directory. |
+| `verbosity` | `"default"` | `"debug"` turns on debug logging and the packet capture (see [Debug packet capture](#debug-packet-capture)). |
+| `pcapFile` | `transporter.pcapng` | Where the debug packet capture goes; only used with `"verbosity": "debug"`. |
+| `maxConnections` | `1024` | Concurrent client connections in total. |
+| `maxConnectionsPerIp` | `32` | Concurrent client connections from one address. |
+| `maxRooms` | `512` | Rooms in total. |
+| `maxRoomsPerIp` | `8` | Rooms owned from one address. |
+| `roomIdleTimeout` | `"24h"` | A Go duration (`"90m"`, `"24h"`): a room that goes this long without an accepted guest is closed. `"0"` disables it. |
+
+A limit left at `0` (or out) uses its default; a negative limit, an unknown
+`verbosity` or an unparseable `roomIdleTimeout` stops the transporter at
+startup. On top of the limits, a client gets 10 seconds for the TLS
+handshake and the protocol handshake, 60 seconds to finish a message once
+it started sending one, and 30 seconds for every write the transporter
 makes to it; one that stops reading is disconnected rather than allowed to
 hold up anyone else. An address that asks for 10 room ids that don't exist
 within a minute is refused further join requests until the minute is up.
@@ -155,14 +166,20 @@ writable directory (e.g. `"pcapFile": "/captures/transporter.pcapng"` with
 
 ## Running the client
 
-The client also reads `config.json` from its current working directory:
+The client also reads `config.json` from its current working directory;
+`client/config.example.json` lists every setting:
 
 ```json
-{ "transporterAddress": "127.0.0.1:9000" }
+{
+  "transporterAddress": "127.0.0.1:9000",
+  "transporterCertificateFingerprint": ""
+}
 ```
 
-Here `transporterAddress` is the address of the (remote) transporter to
-**dial**.
+| Setting | Default | Meaning |
+|---|---|---|
+| `transporterAddress` | required | The address of the (remote) transporter to **dial**. |
+| `transporterCertificateFingerprint` | `""` (no pinning) | The transporter certificate's fingerprint to pin (see [Certificate pinning](#certificate-pinning)). |
 
 ### Certificate pinning
 

@@ -1,8 +1,11 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -188,5 +191,41 @@ func TestCreateConfigRejectsInvalidLimits(t *testing.T) {
 		if _, err := CreateConfig(writeConfigFile(t, content)); err == nil {
 			t.Fatalf("expected an error for %s", content)
 		}
+	}
+}
+
+// TestExampleConfigListsEveryFieldWithItsDefault keeps config.example.json
+// a complete reference: every setting appears in it, and copying it as is
+// behaves exactly like leaving every optional setting out.
+func TestExampleConfigListsEveryFieldWithItsDefault(t *testing.T) {
+	const examplePath = "../config.example.json"
+	data, err := os.ReadFile(examplePath)
+	if err != nil {
+		t.Fatalf("failed to read the example config: %s", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("the example config isn't valid JSON: %s", err)
+	}
+	configType := reflect.TypeOf(TransporterConfiguration{})
+	for i := 0; i < configType.NumField(); i++ {
+		name, _, _ := strings.Cut(configType.Field(i).Tag.Get("json"), ",")
+		if _, ok := fields[name]; !ok {
+			t.Errorf("expected the example config to list %q", name)
+		}
+	}
+
+	example, err := CreateConfig(examplePath)
+	if err != nil {
+		t.Fatalf("the example config doesn't load: %s", err)
+	}
+	defaults := &TransporterConfiguration{Address: example.Address}
+	if example.CertPath() != defaults.CertPath() || example.KeyPath() != defaults.KeyPath() || example.PcapPath() != defaults.PcapPath() || example.IsDebug() {
+		t.Errorf("expected the example's file settings and verbosity to be the defaults, got %+v", example)
+	}
+	if example.ConnectionLimit() != defaults.ConnectionLimit() || example.ConnectionLimitPerIP() != defaults.ConnectionLimitPerIP() ||
+		example.RoomLimit() != defaults.RoomLimit() || example.RoomLimitPerIP() != defaults.RoomLimitPerIP() ||
+		example.RoomIdleTimeoutDuration() != defaults.RoomIdleTimeoutDuration() {
+		t.Errorf("expected the example's limits to be the defaults, got %+v", example)
 	}
 }

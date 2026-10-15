@@ -1,8 +1,11 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -67,5 +70,29 @@ func TestLoadConfigRejectsAMalformedFingerprint(t *testing.T) {
 	path := writeConfigFile(t, `{"transporterAddress": "127.0.0.1:9000", "transporterCertificateFingerprint": "SHA256:not-a-fingerprint"}`)
 	if _, err := LoadConfig(path); err == nil {
 		t.Fatalf("expected an error for a malformed certificate fingerprint")
+	}
+}
+
+// TestExampleConfigListsEveryField keeps config.example.json a complete
+// reference: every setting appears in it, and it loads as is.
+func TestExampleConfigListsEveryField(t *testing.T) {
+	const examplePath = "../config.example.json"
+	data, err := os.ReadFile(examplePath)
+	if err != nil {
+		t.Fatalf("failed to read the example config: %s", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("the example config isn't valid JSON: %s", err)
+	}
+	configType := reflect.TypeOf(ClientConfiguration{})
+	for i := 0; i < configType.NumField(); i++ {
+		name, _, _ := strings.Cut(configType.Field(i).Tag.Get("json"), ",")
+		if _, ok := fields[name]; !ok {
+			t.Errorf("expected the example config to list %q", name)
+		}
+	}
+	if _, err := LoadConfig(examplePath); err != nil {
+		t.Fatalf("the example config doesn't load: %s", err)
 	}
 }
