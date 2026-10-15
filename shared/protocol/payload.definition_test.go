@@ -189,3 +189,108 @@ func TestReadStringRejectsOverflowingLength(t *testing.T) {
 		t.Fatalf("expected an error rejecting the overflowing length, not a silently wrapped offset")
 	}
 }
+
+func filled(size int, value byte) []byte {
+	return bytes.Repeat([]byte{value}, size)
+}
+
+func TestConnectRoomPayloadCarriesTheKeyExchange(t *testing.T) {
+	m := CreateTransporterMessage()
+	sent := &TransporterMessagePayloadConnectRoom{
+		RoomId:       "ROOM1",
+		ClientId:     "GUEST1",
+		PublicKey:    filled(IdentityKeySize, 1),
+		EphemeralKey: filled(EphemeralKeySize, 2),
+		Signature:    filled(SignatureSize, 3),
+	}
+	if err := m.SetPayloadConnectRoom(sent); err != nil {
+		t.Fatalf("SetPayloadConnectRoom failed: %s", err)
+	}
+	received, err := m.GetPayloadConnectRoom()
+	if err != nil {
+		t.Fatalf("GetPayloadConnectRoom failed: %s", err)
+	}
+	if !bytes.Equal(received.EphemeralKey, sent.EphemeralKey) || !bytes.Equal(received.Signature, sent.Signature) {
+		t.Fatalf("expected the key exchange to round-trip, got ephemeral=%x signature=%x", received.EphemeralKey, received.Signature)
+	}
+}
+
+func TestConnectRoomResultPayloadCarriesTheKeyExchange(t *testing.T) {
+	m := CreateTransporterMessage()
+	sent := &TransporterMessagePayloadConnectRoomResult{
+		Accepted:     1,
+		ClientId:     "OWNER1",
+		PublicKey:    filled(IdentityKeySize, 1),
+		EphemeralKey: filled(EphemeralKeySize, 2),
+		Signature:    filled(SignatureSize, 3),
+	}
+	if err := m.SetPayloadConnectRoomResult(sent); err != nil {
+		t.Fatalf("SetPayloadConnectRoomResult failed: %s", err)
+	}
+	received, err := m.GetPayloadConnectRoomResponse()
+	if err != nil {
+		t.Fatalf("GetPayloadConnectRoomResponse failed: %s", err)
+	}
+	if !bytes.Equal(received.EphemeralKey, sent.EphemeralKey) || !bytes.Equal(received.Signature, sent.Signature) {
+		t.Fatalf("expected the key exchange to round-trip, got ephemeral=%x signature=%x", received.EphemeralKey, received.Signature)
+	}
+}
+
+func validJoinRequest() *TransporterMessagePayloadConnectRoom {
+	return &TransporterMessagePayloadConnectRoom{
+		RoomId:       "ROOM1",
+		PublicKey:    filled(IdentityKeySize, 1),
+		EphemeralKey: filled(EphemeralKeySize, 2),
+		Signature:    filled(SignatureSize, 3),
+	}
+}
+
+// TestConnectRoomValidateKeys is a regression test for an oversized public
+// key in a join request: the transporter re-encodes the request for the
+// room owner, and a key sized to overflow that re-encoding used to make the
+// transporter close the owner's room.
+func TestConnectRoomValidateKeys(t *testing.T) {
+	if err := validJoinRequest().ValidateKeys(); err != nil {
+		t.Fatalf("expected a well-formed join request to validate, got %s", err)
+	}
+	cases := map[string]func(*TransporterMessagePayloadConnectRoom){
+		"oversized public key": func(p *TransporterMessagePayloadConnectRoom) { p.PublicKey = filled(61413, 1) },
+		"missing public key":   func(p *TransporterMessagePayloadConnectRoom) { p.PublicKey = nil },
+		"short ephemeral key":  func(p *TransporterMessagePayloadConnectRoom) { p.EphemeralKey = filled(EphemeralKeySize-1, 2) },
+		"missing signature":    func(p *TransporterMessagePayloadConnectRoom) { p.Signature = nil },
+	}
+	for name, corrupt := range cases {
+		t.Run(name, func(t *testing.T) {
+			payload := validJoinRequest()
+			corrupt(payload)
+			if err := payload.ValidateKeys(); err == nil {
+				t.Fatalf("expected the join request to be rejected")
+			}
+		})
+	}
+}
+
+func TestConnectRoomResultValidateKeys(t *testing.T) {
+	accepted := &TransporterMessagePayloadConnectRoomResult{
+		Accepted:     1,
+		PublicKey:    filled(IdentityKeySize, 1),
+		EphemeralKey: filled(EphemeralKeySize, 2),
+		Signature:    filled(SignatureSize, 3),
+	}
+	if err := accepted.ValidateKeys(); err != nil {
+		t.Fatalf("expected a well-formed acceptance to validate, got %s", err)
+	}
+	declined := &TransporterMessagePayloadConnectRoomResult{Accepted: 0, PublicKey: filled(IdentityKeySize, 1)}
+	if err := declined.ValidateKeys(); err != nil {
+		t.Fatalf("a decline needs no key exchange, got %s", err)
+	}
+
+	acceptedWithoutExchange := &TransporterMessagePayloadConnectRoomResult{Accepted: 1, PublicKey: filled(IdentityKeySize, 1)}
+	if err := acceptedWithoutExchange.ValidateKeys(); err == nil {
+		t.Fatalf("expected an acceptance without a key exchange to be rejected")
+	}
+	oversized := &TransporterMessagePayloadConnectRoomResult{Accepted: 0, PublicKey: filled(61413, 1)}
+	if err := oversized.ValidateKeys(); err == nil {
+		t.Fatalf("expected an oversized owner public key to be rejected")
+	}
+}

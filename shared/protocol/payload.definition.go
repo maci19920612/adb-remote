@@ -122,15 +122,27 @@ func (m *TransporterMessage) SetPayloadCreateRoomResponse(data *TransporterMessa
 // region Connect to room payload
 
 // TransporterMessagePayloadConnectRoom carries a join request in both
-// directions: the guest sends {RoomId, PublicKey} to the transporter, which
-// forwards {RoomId, ClientId, PublicKey} to the room owner once it knows
-// which guest sent it. PublicKey is the guest's identity public key (see
-// client/identity); the owner displays its fingerprint so the operator can
-// verify the guest's identity out of band before accepting.
+// directions: the guest sends it without ClientId to the transporter, which
+// forwards it to the room owner with ClientId set to the guest's, once it
+// knows which guest sent it. PublicKey is the guest's identity public key
+// (see client/identity); the owner displays its fingerprint so the operator
+// can verify the guest's identity out of band before accepting.
+// EphemeralKey and Signature are the guest's half of the end-to-end key
+// exchange (see client/e2e), which the transporter only passes through.
 type TransporterMessagePayloadConnectRoom struct {
-	RoomId    string
-	ClientId  string
-	PublicKey []byte
+	RoomId       string
+	ClientId     string
+	PublicKey    []byte
+	EphemeralKey []byte
+	Signature    []byte
+}
+
+// ValidateKeys reports an error unless the identity key and the key
+// exchange all have their exact sizes. Checking them up front keeps an
+// oversized field from failing the message's re-encoding further down the
+// line.
+func (p *TransporterMessagePayloadConnectRoom) ValidateKeys() error {
+	return validateKeys(p.PublicKey, p.EphemeralKey, p.Signature)
 }
 
 func (m *TransporterMessage) GetPayloadConnectRoom() (*TransporterMessagePayloadConnectRoom, error) {
@@ -142,14 +154,24 @@ func (m *TransporterMessage) GetPayloadConnectRoom() (*TransporterMessagePayload
 	if err != nil {
 		return nil, err
 	}
-	_, publicKey, err := m.readString(offset)
+	offset, publicKey, err := m.readString(offset)
+	if err != nil {
+		return nil, err
+	}
+	offset, ephemeralKey, err := m.readString(offset)
+	if err != nil {
+		return nil, err
+	}
+	_, signature, err := m.readString(offset)
 	if err != nil {
 		return nil, err
 	}
 	return &TransporterMessagePayloadConnectRoom{
-		RoomId:    roomId,
-		ClientId:  clientId,
-		PublicKey: []byte(publicKey),
+		RoomId:       roomId,
+		ClientId:     clientId,
+		PublicKey:    []byte(publicKey),
+		EphemeralKey: []byte(ephemeralKey),
+		Signature:    []byte(signature),
 	}, nil
 }
 
@@ -162,7 +184,7 @@ func (m *TransporterMessage) SetPayloadConnectRoom(data *TransporterMessagePaylo
 	if err != nil {
 		return err
 	}
-	payloadLength, err := m.writeString(offset, string(data.PublicKey))
+	payloadLength, err := m.writeKeys(offset, data.PublicKey, data.EphemeralKey, data.Signature)
 	if err != nil {
 		return err
 	}
@@ -175,19 +197,31 @@ func (m *TransporterMessage) SetPayloadConnectRoom(data *TransporterMessagePaylo
 // region Connect to room response
 
 // TransporterMessagePayloadConnectRoomResult carries the owner's
-// accept/decline decision back to the guest. ClientId and PublicKey are the
-// room owner's identity (see client/identity): the client sets only
-// Accepted and PublicKey when sending this from the owner, and the
-// transporter fills in ClientId (which it already knows from the owner's
-// connection) before forwarding to the guest, mirroring how
-// TransporterMessagePayloadConnectRoom's ClientId is filled in for the
-// guest->owner direction. The guest displays the owner's fingerprint so the
-// operator can verify it out of band, symmetric with the owner verifying
-// the guest's.
+// accept/decline decision back to the guest. PublicKey is the room owner's
+// identity (see client/identity). ClientId means something different in
+// each direction: the owner sets it to the client id of the guest the
+// decision is about, so the transporter can refuse a decision that reaches
+// it after that guest already left, and the transporter replaces it with
+// the owner's own client id before forwarding to the guest. The guest
+// displays the owner's fingerprint so the operator can verify it out of
+// band, symmetric with the owner verifying the guest's. EphemeralKey and
+// Signature are the owner's half of the end-to-end key exchange (see
+// client/e2e); a decline leaves them empty.
 type TransporterMessagePayloadConnectRoomResult struct {
-	Accepted  int //0 = false, anything else true
-	ClientId  string
-	PublicKey []byte
+	Accepted     int //0 = false, anything else true
+	ClientId     string
+	PublicKey    []byte
+	EphemeralKey []byte
+	Signature    []byte
+}
+
+// ValidateKeys reports an error unless the owner's identity key has its
+// exact size, and, for an acceptance, the key exchange does too.
+func (p *TransporterMessagePayloadConnectRoomResult) ValidateKeys() error {
+	if p.Accepted == 0 && len(p.EphemeralKey) == 0 && len(p.Signature) == 0 {
+		return validateKey("public key", p.PublicKey, IdentityKeySize)
+	}
+	return validateKeys(p.PublicKey, p.EphemeralKey, p.Signature)
 }
 
 func (m *TransporterMessage) GetPayloadConnectRoomResponse() (*TransporterMessagePayloadConnectRoomResult, error) {
@@ -199,14 +233,24 @@ func (m *TransporterMessage) GetPayloadConnectRoomResponse() (*TransporterMessag
 	if err != nil {
 		return nil, err
 	}
-	_, publicKey, err := m.readString(offset)
+	offset, publicKey, err := m.readString(offset)
+	if err != nil {
+		return nil, err
+	}
+	offset, ephemeralKey, err := m.readString(offset)
+	if err != nil {
+		return nil, err
+	}
+	_, signature, err := m.readString(offset)
 	if err != nil {
 		return nil, err
 	}
 	return &TransporterMessagePayloadConnectRoomResult{
-		Accepted:  accepted,
-		ClientId:  clientId,
-		PublicKey: []byte(publicKey),
+		Accepted:     accepted,
+		ClientId:     clientId,
+		PublicKey:    []byte(publicKey),
+		EphemeralKey: []byte(ephemeralKey),
+		Signature:    []byte(signature),
 	}, nil
 }
 
@@ -219,7 +263,7 @@ func (m *TransporterMessage) SetPayloadConnectRoomResult(data *TransporterMessag
 	if err != nil {
 		return err
 	}
-	payloadLength, err := m.writeString(offset, string(data.PublicKey))
+	payloadLength, err := m.writeKeys(offset, data.PublicKey, data.EphemeralKey, data.Signature)
 	if err != nil {
 		return err
 	}
@@ -307,6 +351,37 @@ func (m *TransporterMessage) readString(offset uint32) (uint32, string, error) {
 	newOffset := dataOffset + length
 	value := string(m.payloadBuffer[dataOffset:newOffset])
 	return newOffset, value, nil
+}
+
+// writeKeys writes an identity public key followed by a key exchange, the
+// tail shared by both join payloads.
+func (m *TransporterMessage) writeKeys(offset uint32, publicKey []byte, ephemeralKey []byte, signature []byte) (uint32, error) {
+	offset, err := m.writeString(offset, string(publicKey))
+	if err != nil {
+		return 0, err
+	}
+	offset, err = m.writeString(offset, string(ephemeralKey))
+	if err != nil {
+		return 0, err
+	}
+	return m.writeString(offset, string(signature))
+}
+
+func validateKeys(publicKey []byte, ephemeralKey []byte, signature []byte) error {
+	if err := validateKey("public key", publicKey, IdentityKeySize); err != nil {
+		return err
+	}
+	if err := validateKey("ephemeral key", ephemeralKey, EphemeralKeySize); err != nil {
+		return err
+	}
+	return validateKey("signature", signature, SignatureSize)
+}
+
+func validateKey(name string, key []byte, size int) error {
+	if len(key) != size {
+		return fmt.Errorf("invalid %s: expected %d bytes, got %d", name, size, len(key))
+	}
+	return nil
 }
 
 func (m *TransporterMessage) updatePayloadMetadata(payloadLength uint32) {

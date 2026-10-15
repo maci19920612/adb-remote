@@ -79,8 +79,13 @@ func registerLogger(container *container.Container) {
 	}
 }
 
+// registerConfig, registerClient, registerIdentity and registerCommands
+// bind lazily: these can fail on the user's input (a missing or invalid
+// config.json, an unreadable identity key), and resolving lazily hands
+// that failure to main as an error to print, where an eager binding would
+// panic while the container is still being built.
 func registerConfig(container *container.Container) {
-	err := container.Singleton(func() (*config.ClientConfiguration, error) {
+	err := container.SingletonLazy(func() (*config.ClientConfiguration, error) {
 		return config.CreateConfig()
 	})
 	if err != nil {
@@ -89,7 +94,7 @@ func registerConfig(container *container.Container) {
 }
 
 func registerClient(container *container.Container) {
-	err := container.Singleton(func(config *config.ClientConfiguration, logger *slog.Logger) (*transportLayer.Client, error) {
+	err := container.SingletonLazy(func(config *config.ClientConfiguration, logger *slog.Logger) (*transportLayer.Client, error) {
 		return transportLayer.CreateClient(logger, config)
 	})
 	if err != nil {
@@ -109,7 +114,7 @@ func registerSmartSocket(container *container.Container) {
 // registerIdentity loads (generating on first run) this installation's
 // persistent identity keypair — see client/identity.
 func registerIdentity(container *container.Container) {
-	err := container.Singleton(func() (*identity.Identity, error) {
+	err := container.SingletonLazy(func() (*identity.Identity, error) {
 		path, err := identity.DefaultPath()
 		if err != nil {
 			return nil, err
@@ -122,7 +127,7 @@ func registerIdentity(container *container.Container) {
 }
 
 func registerCommands(container *container.Container) {
-	err := container.Singleton(func(
+	err := container.SingletonLazy(func(
 		logger *slog.Logger,
 		client *transportLayer.Client,
 		smartSocket adb.IAdbSmartSocket,

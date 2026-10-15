@@ -9,6 +9,12 @@ const poolSizeMax = 100
 
 type ObjectPoolFactory[T any] func() *T
 
+// Resettable is implemented by pooled objects that hold state a later user
+// must not see. Obtain resets such an object before handing it out again.
+type Resettable interface {
+	Reset()
+}
+
 type ObjectPool[T any] struct {
 	mutex     *sync.Mutex
 	container []*DisposableObjectContainer[T]
@@ -35,6 +41,9 @@ func (pool *ObjectPool[T]) Obtain() *DisposableObjectContainer[T] {
 		cachedObject := pool.container[pool.length]
 		pool.container[pool.length] = nil
 		cachedObject.reset()
+		if resettable, ok := any(cachedObject.data).(Resettable); ok {
+			resettable.Reset()
+		}
 		return cachedObject
 	}
 }

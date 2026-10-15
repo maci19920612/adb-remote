@@ -174,3 +174,46 @@ func TestReadNoPayload(t *testing.T) {
 		t.Fatalf("expected an empty payload, got length %d", received.PayloadLength())
 	}
 }
+
+// TestResetClearsTheHeader is a regression test for pooled messages leaking
+// a previous user's payload: a message that only sets its command after
+// Reset must go out with an empty payload, not the stale length and bytes
+// left over from its last use.
+func TestResetClearsTheHeader(t *testing.T) {
+	m := CreateTransporterMessage()
+	m.SetDirectCommand(CommandAdbTransport)
+	if err := m.SetRawPayload([]byte("someone else's adb traffic")); err != nil {
+		t.Fatalf("SetRawPayload failed: %s", err)
+	}
+
+	m.Reset()
+	m.SetDirectCommand(CommandGuestLeft)
+
+	if m.PayloadLength() != 0 || m.PayloadCRC32() != 0 {
+		t.Fatalf("expected an empty payload after Reset, got length=%d crc=%x", m.PayloadLength(), m.PayloadCRC32())
+	}
+	if len(m.Bytes()) != int(HeaderSize) {
+		t.Fatalf("expected only the header on the wire, got %d bytes", len(m.Bytes()))
+	}
+}
+
+func TestClearPayloadEmptiesThePayload(t *testing.T) {
+	m := CreateTransporterMessage()
+	if err := m.SetRawPayload([]byte("stale")); err != nil {
+		t.Fatalf("SetRawPayload failed: %s", err)
+	}
+
+	m.ClearPayload()
+
+	if m.PayloadLength() != 0 || len(m.Payload()) != 0 {
+		t.Fatalf("expected an empty payload, got length=%d", m.PayloadLength())
+	}
+	var written bytes.Buffer
+	if err := m.Write(&written); err != nil {
+		t.Fatalf("Write failed: %s", err)
+	}
+	read := CreateTransporterMessage()
+	if err := read.Read(&written); err != nil {
+		t.Fatalf("an empty payload must still read back cleanly: %s", err)
+	}
+}

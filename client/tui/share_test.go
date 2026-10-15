@@ -310,3 +310,35 @@ func TestShareModelPendingRespondSwallowsQuit(t *testing.T) {
 	default:
 	}
 }
+
+// TestAcceptsAutomatically covers the -trust allow-list: unlike -yes, it
+// only waves through the guests whose fingerprints the owner listed.
+func TestAcceptsAutomatically(t *testing.T) {
+	trusted := []string{"SHA256:trusted"}
+	for _, testCase := range []struct {
+		autoAccept  bool
+		trusted     []string
+		fingerprint string
+		want        bool
+	}{
+		{false, nil, "SHA256:anyone", false},
+		{true, nil, "SHA256:anyone", true},
+		{false, trusted, "SHA256:trusted", true},
+		{false, trusted, "SHA256:stranger", false},
+		{true, trusted, "SHA256:stranger", true},
+	} {
+		if got := acceptsAutomatically(testCase.autoAccept, testCase.trusted, testCase.fingerprint); got != testCase.want {
+			t.Fatalf("acceptsAutomatically(%t, %v, %q) = %t, want %t", testCase.autoAccept, testCase.trusted, testCase.fingerprint, got, testCase.want)
+		}
+	}
+}
+
+func TestParseFingerprints(t *testing.T) {
+	got := ParseFingerprints(" SHA256:a, ,SHA256:b ,")
+	if len(got) != 2 || got[0] != "SHA256:a" || got[1] != "SHA256:b" {
+		t.Fatalf("expected [SHA256:a SHA256:b], got %q", got)
+	}
+	if got := ParseFingerprints(""); len(got) != 0 {
+		t.Fatalf("expected no fingerprints, got %q", got)
+	}
+}

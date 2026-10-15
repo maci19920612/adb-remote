@@ -1,6 +1,7 @@
 package tlsutil
 
 import (
+	"adb-remote.maci.team/shared/certfingerprint"
 	"crypto/tls"
 	"crypto/x509"
 	"path/filepath"
@@ -14,7 +15,7 @@ func TestLoadOrCreateCertificateGeneratesAndPersists(t *testing.T) {
 	certPath := filepath.Join(dir, "cert.pem")
 	keyPath := filepath.Join(dir, "key.pem")
 
-	first, err := LoadOrCreateCertificate(certPath, keyPath)
+	first, _, err := LoadOrCreateCertificate(certPath, keyPath)
 	if err != nil {
 		t.Fatalf("LoadOrCreateCertificate failed: %s", err)
 	}
@@ -22,7 +23,7 @@ func TestLoadOrCreateCertificateGeneratesAndPersists(t *testing.T) {
 		t.Fatalf("expected at least one certificate in the chain")
 	}
 
-	second, err := LoadOrCreateCertificate(certPath, keyPath)
+	second, _, err := LoadOrCreateCertificate(certPath, keyPath)
 	if err != nil {
 		t.Fatalf("second LoadOrCreateCertificate failed: %s", err)
 	}
@@ -36,7 +37,7 @@ func TestLoadOrCreateCertificateNestedDirectory(t *testing.T) {
 	certPath := filepath.Join(dir, "sub", "cert.pem")
 	keyPath := filepath.Join(dir, "sub", "key.pem")
 
-	if _, err := LoadOrCreateCertificate(certPath, keyPath); err != nil {
+	if _, _, err := LoadOrCreateCertificate(certPath, keyPath); err != nil {
 		t.Fatalf("LoadOrCreateCertificate failed: %s", err)
 	}
 }
@@ -46,7 +47,7 @@ func TestGeneratedCertificateIsValidAndUsableForTLS(t *testing.T) {
 	certPath := filepath.Join(dir, "cert.pem")
 	keyPath := filepath.Join(dir, "key.pem")
 
-	cert, err := LoadOrCreateCertificate(certPath, keyPath)
+	cert, _, err := LoadOrCreateCertificate(certPath, keyPath)
 	if err != nil {
 		t.Fatalf("LoadOrCreateCertificate failed: %s", err)
 	}
@@ -91,7 +92,7 @@ var certFingerprintPattern = regexp.MustCompile(`^SHA256:[A-Za-z0-9+/]{43}$`)
 
 func TestFingerprintFormat(t *testing.T) {
 	dir := t.TempDir()
-	cert, err := LoadOrCreateCertificate(filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"))
+	cert, _, err := LoadOrCreateCertificate(filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"))
 	if err != nil {
 		t.Fatalf("LoadOrCreateCertificate failed: %s", err)
 	}
@@ -107,5 +108,59 @@ func TestFingerprintFormat(t *testing.T) {
 func TestFingerprintRejectsEmptyCertificate(t *testing.T) {
 	if _, err := Fingerprint(tls.Certificate{}); err == nil {
 		t.Fatalf("expected an error for a certificate with no DER bytes")
+	}
+}
+
+// TestGeneratedCertificateIsALeafOnly checks the self-signed certificate
+// can't be used to sign other certificates: it only ever identifies the
+// transporter itself.
+func TestGeneratedCertificateIsALeafOnly(t *testing.T) {
+	dir := t.TempDir()
+	cert, _, err := LoadOrCreateCertificate(filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"))
+	if err != nil {
+		t.Fatalf("LoadOrCreateCertificate failed: %s", err)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatalf("failed to parse the generated certificate: %s", err)
+	}
+	if leaf.IsCA {
+		t.Fatalf("expected a leaf certificate, got a CA")
+	}
+	if leaf.KeyUsage&x509.KeyUsageCertSign != 0 {
+		t.Fatalf("expected no certificate signing key usage, got %v", leaf.KeyUsage)
+	}
+}
+
+// TestLoadOrCreateCertificateReportsWhetherItGenerated lets the transporter
+// tell its operator when the certificate (and so its fingerprint, which
+// clients may pin) is new.
+func TestLoadOrCreateCertificateReportsWhetherItGenerated(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+
+	if _, created, err := LoadOrCreateCertificate(certPath, keyPath); err != nil || !created {
+		t.Fatalf("expected the first call to generate a certificate, got created=%t err=%v", created, err)
+	}
+	if _, created, err := LoadOrCreateCertificate(certPath, keyPath); err != nil || created {
+		t.Fatalf("expected the second call to load the existing certificate, got created=%t err=%v", created, err)
+	}
+}
+
+// TestFingerprintMatchesWhatClientsPin keeps the fingerprint the
+// transporter prints identical to the one clients compare against.
+func TestFingerprintMatchesWhatClientsPin(t *testing.T) {
+	dir := t.TempDir()
+	cert, _, err := LoadOrCreateCertificate(filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem"))
+	if err != nil {
+		t.Fatalf("LoadOrCreateCertificate failed: %s", err)
+	}
+	fingerprint, err := Fingerprint(cert)
+	if err != nil {
+		t.Fatalf("Fingerprint failed: %s", err)
+	}
+	if fingerprint != certfingerprint.Of(cert.Certificate[0]) {
+		t.Fatalf("expected %q, got %q", certfingerprint.Of(cert.Certificate[0]), fingerprint)
 	}
 }

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"adb-remote.maci.team/client/adb"
+	"adb-remote.maci.team/client/e2e"
 	"adb-remote.maci.team/client/identity"
 	"adb-remote.maci.team/client/relay"
 	"adb-remote.maci.team/client/transportLayer"
@@ -34,6 +35,7 @@ func JoinAsGuest(ctx context.Context, client *transportLayer.Client, smartSocket
 	if err := roomJoinStep(client, guestIdentity, roomId, onEvent); err != nil {
 		return err
 	}
+	defer client.SetSession(nil)
 
 	logger := client.Logger
 	proxy := adb.NewAdbProxy(localPort, logger)
@@ -93,10 +95,16 @@ func JoinAsGuest(ctx context.Context, client *transportLayer.Client, smartSocket
 	}
 }
 
+// roomJoinStep asks to join roomId and, once the owner accepted, installs
+// the end-to-end session with it (see client/e2e).
 func roomJoinStep(client *transportLayer.Client, guestIdentity *identity.Identity, roomId string, onEvent GuestEventFunc) error {
 	logger := client.Logger
 	logger.Info(fmt.Sprintf("Joining room %s", roomId))
-	if err := client.SendJoinRoom(roomId, guestIdentity.PublicKey); err != nil {
+	handshake, err := e2e.StartGuest(guestIdentity, roomId)
+	if err != nil {
+		return err
+	}
+	if err := client.SendJoinRoom(roomId, guestIdentity.PublicKey, handshake.Offer()); err != nil {
 		logger.Error(fmt.Sprintf("Failed to join room: %s, error: %s", roomId, err))
 		return err
 	}
@@ -126,12 +134,19 @@ func roomJoinStep(client *transportLayer.Client, guestIdentity *identity.Identit
 		logger.Error(fmt.Sprintf("Invalid join room response payload: %s", err))
 		return err
 	}
-	accepted := payload.Accepted != 0
-	emitGuest(onEvent, GuestEvent{Kind: GuestJoinDecided, Accepted: accepted, OwnerClientId: payload.ClientId, OwnerPublicKey: payload.PublicKey})
-	if !accepted {
+	if payload.Accepted == 0 {
+		emitGuest(onEvent, GuestEvent{Kind: GuestJoinDecided, Accepted: false, OwnerClientId: payload.ClientId, OwnerPublicKey: payload.PublicKey})
 		logger.Error(fmt.Sprintf("Join room declined, roomId: %s", roomId))
 		return &ErrJoinRoomDenied{RoomId: roomId}
 	}
+	answer := e2e.KeyExchange{EphemeralKey: payload.EphemeralKey, Signature: payload.Signature}
+	session, err := handshake.Finish(payload.PublicKey, answer)
+	if err != nil {
+		logger.Error(fmt.Sprintf("The room owner's acceptance failed verification: %s", err))
+		return fmt.Errorf("the room owner's acceptance failed verification, the connection may have been tampered with: %w", err)
+	}
+	client.SetSession(session)
+	emitGuest(onEvent, GuestEvent{Kind: GuestJoinDecided, Accepted: true, OwnerClientId: payload.ClientId, OwnerPublicKey: payload.PublicKey})
 	logger.Info(fmt.Sprintf("Joined room: %s", roomId))
 	return nil
 }

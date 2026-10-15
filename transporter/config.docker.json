@@ -1,0 +1,5 @@
+{
+  "transporterAddress": "0.0.0.0:9000",
+  "tlsCertFile": "/data/transporter-cert.pem",
+  "tlsKeyFile": "/data/transporter-key.pem"
+}

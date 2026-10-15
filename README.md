@@ -43,12 +43,50 @@ The transporter reads `config.json` from its current working directory:
 
 `transporterAddress` here is the **listen** address.
 
+Optional limits keep one client (or everyone together) from tying up the
+transporter; the defaults are shown:
+
+```json
+{
+  "transporterAddress": "0.0.0.0:9000",
+  "maxConnections": 1024,
+  "maxConnectionsPerIp": 32,
+  "maxRooms": 512,
+  "maxRoomsPerIp": 8,
+  "roomIdleTimeout": "24h"
+}
+```
+
+`roomIdleTimeout` closes a room that goes that long without an accepted
+guest (`"0"` disables it). On top of these, a client gets 10 seconds for the
+TLS handshake and the protocol handshake, 60 seconds to finish a message
+once it started sending one, and 30 seconds for every write the transporter
+makes to it; one that stops reading is disconnected rather than allowed to
+hold up anyone else. An address that asks for 10 room ids that don't exist
+within a minute is refused further join requests until the minute is up.
+
 ```sh
 cd transporter
 cp config.example.json config.json   # edit as needed
 go run .
 # or: ./transporter   (after `go build`)
 ```
+
+On the first start the transporter generates a self-signed TLS certificate
+(`transporter-cert.pem`/`transporter-key.pem`, or `tlsCertFile`/`tlsKeyFile`)
+and keeps using it afterwards. Every start prints its fingerprint, ready to
+be pinned in the clients' configuration (see
+[Certificate pinning](#certificate-pinning)):
+
+```
+INFO: Loaded the TLS certificate from transporter-cert.pem
+INFO: Transporter TLS certificate fingerprint: SHA256:Uq3ld0dKK7ytd0IA3YdeS2xAkTwpsUU4i3Se27ip8sw
+INFO: To pin it, set "transporterCertificateFingerprint": "SHA256:Uq3ld0dKK7ytd0IA3YdeS2xAkTwpsUU4i3Se27ip8sw" in the clients' config.json
+```
+
+Deleting either file makes the transporter generate a new certificate (it
+says so on startup), and clients that pinned the old one refuse to connect
+until they are given the new fingerprint.
 
 ### Debug packet capture
 
@@ -87,12 +125,26 @@ podman run -d --name adb-remote-transporter \
   adb-remote-transporter
 ```
 
-The image bakes in `transporter/config.example.json` (`0.0.0.0:9000`) as
-`/app/config.json`. To use your own:
+The image bakes in `transporter/config.docker.json` as `/app/config.json`:
+it listens on `0.0.0.0:9000` and keeps the TLS certificate and key in
+`/data`, the only directory the (non-root) service user can write to. Mount
+a volume there so the transporter keeps the same TLS identity across
+containers:
 
 ```sh
 podman run -d --name adb-remote-transporter \
   -p 9000:9000 \
+  -v adb-remote-transporter-data:/data \
+  adb-remote-transporter
+```
+
+To use your own configuration, mount it over `/app/config.json` and keep
+`tlsCertFile`/`tlsKeyFile` pointing into `/data`:
+
+```sh
+podman run -d --name adb-remote-transporter \
+  -p 9000:9000 \
+  -v adb-remote-transporter-data:/data \
   -v "$(pwd)/my-config.json:/app/config.json:ro" \
   adb-remote-transporter
 ```
@@ -112,6 +164,24 @@ The client also reads `config.json` from its current working directory:
 Here `transporterAddress` is the address of the (remote) transporter to
 **dial**.
 
+### Certificate pinning
+
+Optionally, pin the transporter's TLS certificate with the fingerprint the
+transporter prints on startup:
+
+```json
+{
+  "transporterAddress": "transporter.example.com:9000",
+  "transporterCertificateFingerprint": "SHA256:Uq3ld0dKK7ytd0IA3YdeS2xAkTwpsUU4i3Se27ip8sw"
+}
+```
+
+The client then refuses to connect to anything presenting another
+certificate, e.g. someone intercepting the connection, and says which
+fingerprint it got instead. Without it, the client accepts whatever
+certificate the transporter presents. A malformed fingerprint is an error
+at startup rather than silently ignored.
+
 Both commands launch an interactive terminal UI and need a real terminal
 (they exit with an error if stdout isn't a TTY — no surprise garbled output
 in a script or pipe).
@@ -130,24 +200,35 @@ emulator-5554` to skip the picker and go straight to creating a room. Once
 the room exists you'll see:
 
 ```
-Your client id: MVJK1457
-Room id:        QNZQ5630
+Your client id:   MVJK1457
+Your fingerprint: SHA256:x8Hq...
+Room id:          7KQ2-M9XD-4HTB
 
 Waiting for guests to join...
 ```
 
 Share the room id out of band (chat, etc.) with whoever you want to give
-access to. Every join request shows the guest's client id and prompts
-`[y/n]`:
+access to. Every join request shows the guest's client id and identity
+fingerprint and prompts `[y/n]`:
 
 ```
 Join request from clientId: QLHW5807 — accept? [y/n]
+  Guest fingerprint: SHA256:p0Vn...
 ```
 
+Compare that fingerprint with the one the guest's own screen shows (over a
+call, chat, in person) before accepting: the session is encrypted end to end
+to that key (see [Security](#security)), so a matching fingerprint means
+nobody in between can read or change the traffic. The guest's screen
+likewise shows yours to compare.
+
 Accepted/declined requests are logged with the client id in the activity
-feed below. Pass `--yes` to auto-accept every request instead of prompting
-(useful for scripting/demos, not recommended for anything you didn't set up
-yourself) — accept/decline still gets logged with the client id either way.
+feed below. Pass `--trust SHA256:...,SHA256:...` to accept the guests with
+those fingerprints automatically while still being asked about anyone else.
+Pass `--yes` to auto-accept every request instead of prompting (anyone who
+learns the room id gets the device; useful for scripting/demos, not
+recommended for anything you didn't set up yourself) — accept/decline still
+gets logged with the client id either way.
 
 ### Guest: connecting to a shared device
 
@@ -167,7 +248,7 @@ picks up the shared device on its own:
 
 ```
 Your client id: QLHW5807
-Room id:        QNZQ5630
+Room id:        7KQ2-M9XD-4HTB
 
 Connection state: relaying ADB traffic
 
@@ -188,11 +269,53 @@ exits for any other reason, so a stale entry doesn't linger in `adb
 devices`.
 
 `--port` defaults to `5038` (`adb.DefaultProxyPort`) and just needs to be a
-free local port.
+free local port. The proxy only listens on `127.0.0.1`: it authenticates
+nobody, so it must not be reachable from the network.
 
 Client logs (from the underlying transport/relay layers) don't go to
 stdout — that's reserved for the TUI — they're written to
 `$TMPDIR/adb-remote-client.log` instead.
+
+## Security
+
+- **ADB traffic is encrypted end to end** between the owner and the guest
+  (`client/e2e`). The guest's join request and the owner's acceptance carry
+  an X25519 key exchange, each half signed with that side's identity key
+  (`~/.adb-remote/identity`, Ed25519), the key whose fingerprint the TUI
+  shows. Each direction then uses its own AES-256-GCM key, with a message
+  counter as the nonce, so a message that is altered, dropped, repeated or
+  reordered ends the session. The transporter only routes the encrypted
+  messages; it still sees who talks to whom, room ids, and how much and when
+  they send. A relay that swapped the key exchange for its own couldn't sign
+  it with the genuine identity keys, and swapping the identity keys as well
+  changes the fingerprints the two people compare.
+- **The client-transporter connection is TLS 1.3**, against the
+  transporter's self-signed certificate. A client that pins the
+  certificate's fingerprint ([Certificate pinning](#certificate-pinning))
+  connects only to that transporter; without pinning, TLS only keeps
+  passive listeners out. Either way, the end-to-end encryption above is
+  what protects the ADB traffic.
+- **The guest only gets the shared device.** The owner opens just the device
+  services a real adb client asks a device for (`shell`, `sync:`, `exec:`,
+  forwarded sockets, …) and refuses everything its adb-server would treat
+  as a request to itself (`host:kill`, `host:connect:…`, switching to
+  another device, malformed `reverse:` requests).
+- **Nothing flows before the owner accepts.** The transporter relays ADB
+  traffic only once the owner accepted the room's guest, the owner's
+  decision names the guest it is about, and a declined guest is
+  disconnected.
+- **The owner can't crash the guest's adb-server.** The guest only lets the
+  owner open the reverse-forward targets its own adb-server asked for
+  (anything else makes adb-server abort), and drops `CNXN`/`SYNC` from the
+  owner.
+- **Reverse-forward relay endpoints are private:** on macOS and Linux the
+  device's connections reach the owner through a Unix socket in a directory
+  only the owner's user can enter (a loopback TCP port on Windows).
+- **Room ids** are 12 random base32 symbols (60 bits), and the transporter
+  rate-limits failed join attempts per address.
+
+Protocol version 2 introduced the end-to-end encryption; version 1 clients
+and transporters can't talk to version 2 ones.
 
 ## Testing
 
@@ -249,8 +372,9 @@ the `sync:` protocol and multi-chunk flow control), and several concurrent
   owner and guest are two machines. The owner can't pass
   `reverse:forward:<remote>;<local>` through unchanged, since its own
   adb-server would then connect to `<local>` on the owner's machine. So
-  `client/relay/reverse.go` points the device at an owner-side relay port
-  instead and hands each connection arriving there to the guest as a
+  `client/relay/reverse.go` points the device at an owner-side relay
+  endpoint instead (a private Unix socket, `localfilesystem:<path>`, except
+  on Windows) and hands each connection arriving there to the guest as a
   device-initiated `OPEN` for the original `<local>`, which the guest's
   adb-server connects to itself.
 - **The TUI itself**: verified with a real two-process, real-terminal (PTY)

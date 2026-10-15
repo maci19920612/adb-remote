@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func writeConfigFile(t *testing.T, content string) string {
@@ -126,5 +127,66 @@ func TestCreateConfigParsesPcapFile(t *testing.T) {
 	}
 	if config.PcapPath() != "/captures/t.pcapng" {
 		t.Fatalf("expected the overridden pcap path, got %q", config.PcapPath())
+	}
+}
+
+func TestLimitsDefaultWhenOmitted(t *testing.T) {
+	config, err := CreateConfig(writeConfigFile(t, `{"transporterAddress": "0.0.0.0:9000"}`))
+	if err != nil {
+		t.Fatalf("CreateConfig failed: %s", err)
+	}
+	if config.ConnectionLimit() != DefaultMaxConnections || config.ConnectionLimitPerIP() != DefaultMaxConnectionsPerIP {
+		t.Fatalf("expected the default connection limits, got %d/%d", config.ConnectionLimit(), config.ConnectionLimitPerIP())
+	}
+	if config.RoomLimit() != DefaultMaxRooms || config.RoomLimitPerIP() != DefaultMaxRoomsPerIP {
+		t.Fatalf("expected the default room limits, got %d/%d", config.RoomLimit(), config.RoomLimitPerIP())
+	}
+	if config.RoomIdleTimeoutDuration() != DefaultRoomIdleTimeout {
+		t.Fatalf("expected the default room idle timeout, got %s", config.RoomIdleTimeoutDuration())
+	}
+}
+
+func TestCreateConfigParsesLimits(t *testing.T) {
+	config, err := CreateConfig(writeConfigFile(t, `{
+		"transporterAddress": "0.0.0.0:9000",
+		"maxConnections": 10,
+		"maxConnectionsPerIp": 2,
+		"maxRooms": 5,
+		"maxRoomsPerIp": 1,
+		"roomIdleTimeout": "90m"
+	}`))
+	if err != nil {
+		t.Fatalf("CreateConfig failed: %s", err)
+	}
+	if config.ConnectionLimit() != 10 || config.ConnectionLimitPerIP() != 2 || config.RoomLimit() != 5 || config.RoomLimitPerIP() != 1 {
+		t.Fatalf("expected the configured limits, got %+v", config)
+	}
+	if config.RoomIdleTimeoutDuration() != 90*time.Minute {
+		t.Fatalf("expected a 90m room idle timeout, got %s", config.RoomIdleTimeoutDuration())
+	}
+}
+
+func TestRoomIdleTimeoutZeroDisablesIt(t *testing.T) {
+	config, err := CreateConfig(writeConfigFile(t, `{"transporterAddress": "0.0.0.0:9000", "roomIdleTimeout": "0"}`))
+	if err != nil {
+		t.Fatalf("CreateConfig failed: %s", err)
+	}
+	if config.RoomIdleTimeoutDuration() != 0 {
+		t.Fatalf("expected the room idle timeout to be disabled, got %s", config.RoomIdleTimeoutDuration())
+	}
+}
+
+func TestCreateConfigRejectsInvalidLimits(t *testing.T) {
+	for _, content := range []string{
+		`{"transporterAddress": "0.0.0.0:9000", "maxConnections": -1}`,
+		`{"transporterAddress": "0.0.0.0:9000", "maxConnectionsPerIp": -1}`,
+		`{"transporterAddress": "0.0.0.0:9000", "maxRooms": -1}`,
+		`{"transporterAddress": "0.0.0.0:9000", "maxRoomsPerIp": -1}`,
+		`{"transporterAddress": "0.0.0.0:9000", "roomIdleTimeout": "soon"}`,
+		`{"transporterAddress": "0.0.0.0:9000", "roomIdleTimeout": "-5m"}`,
+	} {
+		if _, err := CreateConfig(writeConfigFile(t, content)); err == nil {
+			t.Fatalf("expected an error for %s", content)
+		}
 	}
 }

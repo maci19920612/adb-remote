@@ -58,6 +58,20 @@ func (m *TransporterMessage) Payload() []byte {
 	return m.payloadBuffer[:m.PayloadLength()]
 }
 
+// Reset clears the header, so a message reused from a pool starts with no
+// command and an empty payload instead of whatever its previous user left
+// behind. The payload bytes stay in the buffer, but nothing reads or writes
+// past PayloadLength.
+func (m *TransporterMessage) Reset() {
+	clear(m.headerBuffer)
+}
+
+// ClearPayload marks the message as having no payload, for commands that
+// carry none.
+func (m *TransporterMessage) ClearPayload() {
+	m.updatePayloadMetadata(0)
+}
+
 func (m *TransporterMessage) SetDirectCommand(command uint32) {
 	ByteOrder.PutUint32(m.commandBuffer, command)
 }

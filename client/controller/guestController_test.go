@@ -2,8 +2,10 @@ package controller
 
 import (
 	"adb-remote.maci.team/client/adb"
+	"adb-remote.maci.team/client/e2e"
 	"adb-remote.maci.team/client/identity"
 	"adb-remote.maci.team/client/relay"
+	"adb-remote.maci.team/client/transportLayer"
 	"adb-remote.maci.team/shared/protocol"
 	"bytes"
 	"context"
@@ -25,16 +27,42 @@ func testIdentity(t *testing.T) *identity.Identity {
 	return guestIdentity
 }
 
-func respondToJoinRoom(t *testing.T, server net.Conn, accepted int) {
+// respondToJoinRoom plays the room owner on the fake transporter's end of
+// the guest's connection: it reads the join request for ROOM1 and accepts
+// it with a genuine key exchange (or declines it), returning the owner's
+// session with the guest when accepting.
+func respondToJoinRoom(t *testing.T, server net.Conn, accepted int) *e2e.Session {
 	t.Helper()
+	ownerIdentity := testIdentity(t)
 	request := readMessage(t, server)
 	if request.Command() != protocol.CommandJoinRoom {
 		t.Fatalf("expected a join room request, got %x", request.Command())
 	}
+	payload, err := request.GetPayloadConnectRoom()
+	if err != nil {
+		t.Fatalf("GetPayloadConnectRoom failed: %s", err)
+	}
 
+	result := &protocol.TransporterMessagePayloadConnectRoomResult{Accepted: accepted, ClientId: "OWNER1", PublicKey: ownerIdentity.PublicKey}
+	var session *e2e.Session
+	if accepted != 0 {
+		var answer e2e.KeyExchange
+		answer, session, err = e2e.Accept(ownerIdentity, "ROOM1", payload.PublicKey, e2e.KeyExchange{EphemeralKey: payload.EphemeralKey, Signature: payload.Signature})
+		if err != nil {
+			t.Fatalf("the guest's join request failed verification: %s", err)
+		}
+		result.EphemeralKey = answer.EphemeralKey
+		result.Signature = answer.Signature
+	}
+	writeJoinResult(t, server, result)
+	return session
+}
+
+func writeJoinResult(t *testing.T, server net.Conn, result *protocol.TransporterMessagePayloadConnectRoomResult) {
+	t.Helper()
 	response := protocol.CreateTransporterMessage()
 	response.SetResponseCommand(protocol.CommandJoinRoom)
-	if err := response.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{Accepted: accepted}); err != nil {
+	if err := response.SetPayloadConnectRoomResult(result); err != nil {
 		t.Fatalf("SetPayloadConnectRoomResult failed: %s", err)
 	}
 	if err := response.Write(server); err != nil {
@@ -96,17 +124,55 @@ func TestRoomJoinStepSendsPublicKey(t *testing.T) {
 	if !bytes.Equal(payload.PublicKey, guestIdentity.PublicKey) {
 		t.Fatalf("expected the join request to carry the guest's public key %x, got %x", []byte(guestIdentity.PublicKey), payload.PublicKey)
 	}
+	offer := e2e.KeyExchange{EphemeralKey: payload.EphemeralKey, Signature: payload.Signature}
+	if err := e2e.VerifyOffer("ROOM1", payload.PublicKey, offer); err != nil {
+		t.Fatalf("expected the join request to carry an offer signed by the guest: %s", err)
+	}
 
-	response := protocol.CreateTransporterMessage()
-	response.SetResponseCommand(protocol.CommandJoinRoom)
-	if err := response.SetPayloadConnectRoomResult(&protocol.TransporterMessagePayloadConnectRoomResult{Accepted: 1}); err != nil {
-		t.Fatalf("SetPayloadConnectRoomResult failed: %s", err)
+	writeJoinResult(t, server, &protocol.TransporterMessagePayloadConnectRoomResult{Accepted: 0, PublicKey: testIdentity(t).PublicKey})
+	<-done
+}
+
+// TestRoomJoinStepRejectsAForgedAcceptance covers a relay that forwards the
+// owner's genuine public key (so the fingerprint matches) with a key
+// exchange of its own: the acceptance isn't signed by that key, so the
+// guest refuses it and never starts relaying.
+func TestRoomJoinStepRejectsAForgedAcceptance(t *testing.T) {
+	client, server := newConnectedClient(t)
+	guestIdentity := testIdentity(t)
+
+	done := make(chan error, 1)
+	go func() { done <- roomJoinStep(client, guestIdentity, "ROOM1", nil) }()
+
+	request, err := readMessage(t, server).GetPayloadConnectRoom()
+	if err != nil {
+		t.Fatalf("GetPayloadConnectRoom failed: %s", err)
 	}
-	if err := response.Write(server); err != nil {
-		t.Fatalf("failed to write the response: %s", err)
+	owner := testIdentity(t)
+	relay := testIdentity(t)
+	answer, _, err := e2e.Accept(relay, "ROOM1", request.PublicKey, e2e.KeyExchange{EphemeralKey: request.EphemeralKey, Signature: request.Signature})
+	if err != nil {
+		t.Fatalf("Accept failed: %s", err)
 	}
-	if err := <-done; err != nil {
-		t.Fatalf("roomJoinStep failed: %s", err)
+	writeJoinResult(t, server, &protocol.TransporterMessagePayloadConnectRoomResult{
+		Accepted:     1,
+		ClientId:     "OWNER1",
+		PublicKey:    owner.PublicKey,
+		EphemeralKey: answer.EphemeralKey,
+		Signature:    answer.Signature,
+	})
+
+	err = <-done
+	var denied *ErrJoinRoomDenied
+	if err == nil || errors.As(err, &denied) {
+		t.Fatalf("expected the forged acceptance to be refused, got %v", err)
+	}
+	probe := adb.CreateMessage()
+	if err := probe.Set(adb.CommandOpen, 1, 0, []byte("shell:")); err != nil {
+		t.Fatalf("Set failed: %s", err)
+	}
+	if err := client.SendAdbMessage(probe); !errors.Is(err, transportLayer.ErrNoSession) {
+		t.Fatalf("expected no session after a refused acceptance, got %v", err)
 	}
 }
 
@@ -218,7 +284,7 @@ func TestJoinAsGuestRelaysAdbTraffic(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- JoinAsGuest(ctx, client, smartSocket, guestIdentity, "ROOM1", port, onEvent) }()
 
-	respondToJoinRoom(t, server, 1)
+	ownerSession := respondToJoinRoom(t, server, 1)
 
 	// Simulate the local ADB server connecting to our proxy. The proxy is
 	// started asynchronously right after the join room response is
@@ -264,7 +330,11 @@ func TestJoinAsGuestRelaysAdbTraffic(t *testing.T) {
 	if forwarded.Command() != protocol.CommandAdbTransport {
 		t.Fatalf("expected command %x, got %x", protocol.CommandAdbTransport, forwarded.Command())
 	}
-	decoded, err := adb.DecodeMessage(forwarded.Payload())
+	opened, err := ownerSession.Open(nil, forwarded.Payload())
+	if err != nil {
+		t.Fatalf("the owner failed to decrypt the forwarded message: %s", err)
+	}
+	decoded, err := adb.DecodeMessage(opened)
 	if err != nil {
 		t.Fatalf("DecodeMessage failed: %s", err)
 	}
@@ -280,7 +350,7 @@ func TestJoinAsGuestRelaysAdbTraffic(t *testing.T) {
 	}
 	wrapper := protocol.CreateTransporterMessage()
 	wrapper.SetDirectCommand(protocol.CommandAdbTransport)
-	if err := wrapper.SetRawPayload(okayMessage.Bytes()); err != nil {
+	if err := wrapper.SetRawPayload(ownerSession.Seal(nil, okayMessage.Bytes())); err != nil {
 		t.Fatalf("SetRawPayload failed: %s", err)
 	}
 	if err := wrapper.Write(server); err != nil {

@@ -166,3 +166,37 @@ func TestObtainDisposeConcurrentUse(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+type resettableItem struct {
+	value  int
+	resets int
+}
+
+func (r *resettableItem) Reset() {
+	r.value = 0
+	r.resets++
+}
+
+// TestObtainResetsReusedResettableObjects is a regression test for pooled
+// objects leaking state into their next use: a reused object that knows
+// how to clean itself up must be reset before Obtain hands it out again.
+func TestObtainResetsReusedResettableObjects(t *testing.T) {
+	pool := NewObjectPool(func() *resettableItem { return &resettableItem{} })
+	container := pool.Obtain()
+	data, _ := container.Data()
+	data.value = 42
+	if err := container.Dispose(); err != nil {
+		t.Fatalf("Dispose failed: %s", err)
+	}
+
+	reused, err := pool.Obtain().Data()
+	if err != nil {
+		t.Fatalf("Data() failed: %s", err)
+	}
+	if reused != data {
+		t.Fatalf("expected the disposed object to be reused")
+	}
+	if reused.value != 0 || reused.resets != 1 {
+		t.Fatalf("expected the reused object to be reset once, got value=%d resets=%d", reused.value, reused.resets)
+	}
+}

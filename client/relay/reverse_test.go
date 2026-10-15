@@ -5,13 +5,31 @@ import (
 	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
 
-var rewrittenScrcpyForward = regexp.MustCompile(`^reverse:forward:localabstract:scrcpy;tcp:(\d+)$`)
+var rewrittenScrcpyForward = regexp.MustCompile(`^reverse:forward:localabstract:scrcpy;((?:tcp|localfilesystem):.+)$`)
+
+// dialRelay connects to a relay endpoint the way the owner's adb-server
+// does when the device connects through the reverse forward.
+func dialRelay(t *testing.T, spec string) (net.Conn, error) {
+	t.Helper()
+	if path, ok := strings.CutPrefix(spec, "localfilesystem:"); ok {
+		return net.DialTimeout("unix", path, time.Second)
+	}
+	if port, ok := strings.CutPrefix(spec, "tcp:"); ok {
+		return net.DialTimeout("tcp", "127.0.0.1:"+port, time.Second)
+	}
+	t.Fatalf("unexpected relay endpoint %q", spec)
+	return nil, nil
+}
 
 // deliverToMultiplexer hands m an ADB message as if the guest had sent it.
 func deliverToMultiplexer(t *testing.T, client *fakeTransportClient, m *OwnerMultiplexer, command uint32, arg1 uint32, arg2 uint32, data []byte) {
@@ -57,7 +75,7 @@ func respondingConn(reply string) net.Conn {
 }
 
 // openScrcpyReverseForward has the guest request scrcpy's usual reverse
-// forward and returns the local relay port the device was asked to use
+// forward and returns the local relay endpoint the device was asked to use
 // instead of the guest's tcp:27183.
 func openScrcpyReverseForward(t *testing.T, client *fakeTransportClient, smartSocket *fakeOwnerSmartSocket, m *OwnerMultiplexer, guestId uint32, local string) string {
 	t.Helper()
@@ -67,18 +85,18 @@ func openScrcpyReverseForward(t *testing.T, client *fakeTransportClient, smartSo
 	requested := smartSocket.requestedServices()
 	last := requested[len(requested)-1]
 	match := rewrittenScrcpyForward.FindStringSubmatch(last)
-	if match == nil || "tcp:"+match[1] == local {
-		t.Fatalf("expected the reverse forward to be rewritten to a local relay port, the device was asked for %q", last)
+	if match == nil || match[1] == local {
+		t.Fatalf("expected the reverse forward to be rewritten to a local relay endpoint, the device was asked for %q", last)
 	}
 	return match[1]
 }
 
-func expectRelayPortClosed(t *testing.T, port string) {
+func expectRelayPortClosed(t *testing.T, spec string) {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp", "127.0.0.1:"+port, time.Second)
+	conn, err := dialRelay(t, spec)
 	if err == nil {
 		_ = conn.Close()
-		t.Fatalf("expected relay port %s to be closed", port)
+		t.Fatalf("expected relay endpoint %s to be closed", spec)
 	}
 }
 
@@ -101,7 +119,7 @@ func TestOwnerMultiplexerReverseForwardRelaysDeviceConnectionsToTheGuest(t *test
 
 	// The local adb-server connecting to the relay port is how a device-side
 	// connection to the forward's remote end shows up on the owner.
-	deviceSide, err := net.Dial("tcp", "127.0.0.1:"+port)
+	deviceSide, err := dialRelay(t, port)
 	if err != nil {
 		t.Fatalf("failed to connect to the relay port: %s", err)
 	}
@@ -165,7 +183,7 @@ func TestOwnerMultiplexerReverseForwardRebindKeepsThePortAndRetargets(t *testing
 		t.Fatalf("expected the rebind to reuse relay port %s, got %s", firstPort, secondPort)
 	}
 
-	deviceSide, err := net.Dial("tcp", "127.0.0.1:"+secondPort)
+	deviceSide, err := dialRelay(t, secondPort)
 	if err != nil {
 		t.Fatalf("failed to connect to the relay port: %s", err)
 	}
@@ -244,8 +262,47 @@ func TestOwnerMultiplexerReverseForwardFailureClosesTheRelayPort(t *testing.T) {
 
 	requested := smartSocket.requestedServices()
 	match := rewrittenScrcpyForward.FindStringSubmatch(requested[len(requested)-1])
-	if match == nil || match[1] == "27183" {
+	if match == nil || match[1] == "tcp:27183" {
 		t.Fatalf("expected a rewritten reverse forward request, got %q", requested)
 	}
 	expectRelayPortClosed(t, match[1])
+}
+
+// TestOwnerMultiplexerReverseForwardRelayIsPrivate is a regression test for
+// the relay endpoint being a loopback TCP port, which any local process
+// could connect to and be relayed to the guest as if it were the device.
+// Where adb-server can use one, it is a Unix socket only this user can
+// reach, and it disappears with the forward.
+func TestOwnerMultiplexerReverseForwardRelayIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("adb-server can't connect to Unix sockets on Windows")
+	}
+	client := newFakeTransportClient()
+	forwardConn, ownerSideConn := net.Pipe()
+	defer forwardConn.Close()
+	smartSocket := newFakeOwnerSmartSocket().
+		withStreamPrefix("reverse:forward:", func() net.Conn { return ownerSideConn }).
+		withStreamPrefix("reverse:killforward:", func() net.Conn { return respondingConn("OKAY") })
+
+	m := NewOwnerMultiplexer(smartSocket, "emulator-5554", client, newTestLogger())
+	defer m.Close()
+
+	spec := openScrcpyReverseForward(t, client, smartSocket, m, 5, "tcp:27183")
+	path, ok := strings.CutPrefix(spec, "localfilesystem:")
+	if !ok {
+		t.Fatalf("expected a Unix socket relay endpoint, got %q", spec)
+	}
+	info, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("failed to stat the relay socket's directory: %s", err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("expected the relay socket's directory to be private (0700), got %o", info.Mode().Perm())
+	}
+
+	deliverToMultiplexer(t, client, m, adb.CommandOpen, 6, 0, []byte("reverse:killforward:localabstract:scrcpy\x00"))
+	expectSentToGuest(t, client, adb.CommandOkay)
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Fatalf("expected the relay socket's directory to be removed with the forward, got err=%v", err)
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"adb-remote.maci.team/client/transportLayer"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -84,18 +85,19 @@ func newShareModel(ctx context.Context, smartSocket adb.IAdbSmartSocket, presetD
 
 // RunShare runs the interactive share TUI to completion. If presetDevice is
 // non-empty, the device picker is skipped. If autoAccept is true, join
-// requests are accepted automatically instead of prompting. sessionTimeout
+// requests are accepted automatically instead of prompting; otherwise only
+// guests whose fingerprint is in trustedFingerprints are. sessionTimeout
 // closes the room (and this process) once it elapses after the room is
 // created; a zero or negative value (including the documented -1 CLI
 // sentinel) disables the timeout.
-func RunShare(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, ownerIdentity *identity.Identity, presetDevice string, autoAccept bool, sessionTimeout time.Duration) error {
+func RunShare(ctx context.Context, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, ownerIdentity *identity.Identity, presetDevice string, autoAccept bool, trustedFingerprints []string, sessionTimeout time.Duration) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	m := newShareModel(ctx, smartSocket, presetDevice, autoAccept, ownerIdentity.Fingerprint(), client)
 	program := tea.NewProgram(m, tea.WithAltScreen())
 
-	go runOwnerFlow(ctx, program, m, client, smartSocket, ownerIdentity, autoAccept, sessionTimeout)
+	go runOwnerFlow(ctx, program, m, client, smartSocket, ownerIdentity, autoAccept, trustedFingerprints, sessionTimeout)
 
 	_, err := program.Run()
 	cancel()
@@ -108,7 +110,7 @@ func RunShare(ctx context.Context, client *transportLayer.Client, smartSocket ad
 // runOwnerFlow waits for a device to be selected, then performs the
 // handshake and services the room, forwarding every state change into the
 // TUI as a message.
-func runOwnerFlow(ctx context.Context, program *tea.Program, m *shareModel, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, ownerIdentity *identity.Identity, autoAccept bool, sessionTimeout time.Duration) {
+func runOwnerFlow(ctx context.Context, program *tea.Program, m *shareModel, client *transportLayer.Client, smartSocket adb.IAdbSmartSocket, ownerIdentity *identity.Identity, autoAccept bool, trustedFingerprints []string, sessionTimeout time.Duration) {
 	var deviceId string
 	select {
 	case deviceId = <-m.selectedDevice:
@@ -124,11 +126,12 @@ func runOwnerFlow(ctx context.Context, program *tea.Program, m *shareModel, clie
 	program.Send(clientIdMsg(clientId))
 
 	promptAccept := func(guestClientId string, guestPublicKey []byte) (bool, error) {
-		if autoAccept {
+		fingerprint := identity.Fingerprint(guestPublicKey)
+		if acceptsAutomatically(autoAccept, trustedFingerprints, fingerprint) {
 			return true, nil
 		}
 		respond := make(chan bool, 1)
-		program.Send(joinRequestMsg{clientId: guestClientId, fingerprint: identity.Fingerprint(guestPublicKey), respond: respond})
+		program.Send(joinRequestMsg{clientId: guestClientId, fingerprint: fingerprint, respond: respond})
 		select {
 		case accepted := <-respond:
 			return accepted, nil
@@ -161,6 +164,25 @@ func runOwnerFlow(ctx context.Context, program *tea.Program, m *shareModel, clie
 	if err := controller.JoinAsRoomOwner(ownerCtx, client, smartSocket, deviceId, ownerIdentity, promptAccept, onEvent); err != nil && ctx.Err() == nil && !timedOut.Load() {
 		program.Send(shareErrorMsg{err})
 	}
+}
+
+// acceptsAutomatically reports whether a guest with fingerprint is accepted
+// without asking: everyone with autoAccept (-yes), otherwise only the
+// fingerprints the owner trusts (-trust).
+func acceptsAutomatically(autoAccept bool, trustedFingerprints []string, fingerprint string) bool {
+	return autoAccept || slices.Contains(trustedFingerprints, fingerprint)
+}
+
+// ParseFingerprints splits a comma-separated list of fingerprints, as given
+// to -trust.
+func ParseFingerprints(list string) []string {
+	fingerprints := make([]string, 0)
+	for _, fingerprint := range strings.Split(list, ",") {
+		if fingerprint = strings.TrimSpace(fingerprint); fingerprint != "" {
+			fingerprints = append(fingerprints, fingerprint)
+		}
+	}
+	return fingerprints
 }
 
 // --- messages ---
@@ -372,7 +394,8 @@ func (m *shareModel) View() string {
 		if m.pendingRespond != nil {
 			b.WriteString(promptStyle.Render(fmt.Sprintf("Join request from clientId: %s — accept? [y/n]", m.pendingGuestId)) + "\n")
 			b.WriteString(labelStyle.Render("  Guest fingerprint: ") + m.pendingFingerprint + "\n")
-			b.WriteString(dimStyle.Render("  Verify this matches the guest's own displayed fingerprint out of band before accepting.") + "\n\n")
+			b.WriteString(dimStyle.Render("  Verify this matches the guest's own displayed fingerprint out of band before accepting:") + "\n")
+			b.WriteString(dimStyle.Render("  the session is encrypted end to end to that key.") + "\n\n")
 		} else if m.connectedGuestId != "" {
 			b.WriteString(labelStyle.Render("Connected guest: ") + successStyle.Render(m.connectedGuestId) + "\n")
 			b.WriteString(labelStyle.Render("  Guest fingerprint: ") + m.connectedGuestFingerprint + "\n\n")

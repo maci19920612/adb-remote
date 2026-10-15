@@ -189,7 +189,9 @@ func (m *connectModel) View() string {
 	b.WriteString(labelStyle.Render("Room id:        ") + m.roomId + "\n\n")
 	if m.ownerClientId != "" {
 		b.WriteString(labelStyle.Render("Room owner: ") + successStyle.Render(m.ownerClientId) + "\n")
-		b.WriteString(labelStyle.Render("  Owner fingerprint: ") + m.ownerFingerprint + "\n\n")
+		b.WriteString(labelStyle.Render("  Owner fingerprint: ") + m.ownerFingerprint + "\n")
+		b.WriteString(dimStyle.Render("  Verify this matches the owner's own displayed fingerprint out of band:") + "\n")
+		b.WriteString(dimStyle.Render("  the session is encrypted end to end to that key.") + "\n\n")
 	}
 	b.WriteString(labelStyle.Render("Connection state: ") + m.stateLine() + "\n\n")
 

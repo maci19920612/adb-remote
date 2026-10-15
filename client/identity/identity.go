@@ -6,7 +6,9 @@
 // actually talking to who they think they are — the transporter is a
 // relay, not a trusted party, so this check is what actually protects
 // against a compromised or malicious relay silently substituting a
-// different guest.
+// different guest. The key also signs this side's half of the end-to-end
+// key exchange (see client/e2e), so a matching fingerprint means the
+// session's keys are shared with that very person.
 package identity
 
 import (

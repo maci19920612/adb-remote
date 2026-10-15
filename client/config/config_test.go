@@ -38,3 +38,34 @@ func TestLoadConfigInvalidJson(t *testing.T) {
 		t.Fatalf("expected an error for invalid JSON")
 	}
 }
+
+const testFingerprint = "SHA256:Uq3ld0dKK7ytd0IA3YdeS2xAkTwpsUU4i3Se27ip8sw"
+
+func TestLoadConfigCertificatePinningIsOptional(t *testing.T) {
+	config, err := LoadConfig(writeConfigFile(t, `{"transporterAddress": "127.0.0.1:9000"}`))
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %s", err)
+	}
+	if config.TransporterCertificateFingerprint != "" {
+		t.Fatalf("expected no pinned certificate, got %q", config.TransporterCertificateFingerprint)
+	}
+}
+
+func TestLoadConfigParsesThePinnedCertificateFingerprint(t *testing.T) {
+	config, err := LoadConfig(writeConfigFile(t, `{"transporterAddress": "127.0.0.1:9000", "transporterCertificateFingerprint": "`+testFingerprint+`"}`))
+	if err != nil {
+		t.Fatalf("LoadConfig failed: %s", err)
+	}
+	if config.TransporterCertificateFingerprint != testFingerprint {
+		t.Fatalf("expected the pinned fingerprint %q, got %q", testFingerprint, config.TransporterCertificateFingerprint)
+	}
+}
+
+// TestLoadConfigRejectsAMalformedFingerprint checks a typo in the pinned
+// fingerprint stops the client instead of silently turning pinning off.
+func TestLoadConfigRejectsAMalformedFingerprint(t *testing.T) {
+	path := writeConfigFile(t, `{"transporterAddress": "127.0.0.1:9000", "transporterCertificateFingerprint": "SHA256:not-a-fingerprint"}`)
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatalf("expected an error for a malformed certificate fingerprint")
+	}
+}

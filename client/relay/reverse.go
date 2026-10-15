@@ -1,9 +1,13 @@
 package relay
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -17,19 +21,25 @@ import (
 // on the device and <local> a socket on the guest's machine. Passing that
 // to the owner's adb-server unchanged would make it connect to <local> on
 // the owner's machine, where nothing listens (and the guest's scrcpy waits
-// in vain), so the owner rewrites <local> to a relay port of its own and
+// in vain), so the owner rewrites <local> to a relay endpoint of its own and
 // hands every connection arriving there to the guest as an OPEN for the
 // original <local>. The guest's adb-server, having seen the original
 // request pass through it, accepts that OPEN and connects to <local>
 // itself.
 //
 // "reverse:list-forward" is passed through unchanged, so it lists the relay
-// ports rather than the guest's own <local> ends.
+// endpoints rather than the guest's own <local> ends.
+//
+// Whatever connects to a relay endpoint is relayed to the guest as the
+// device, so the endpoint is a Unix socket in a directory only this user
+// can enter wherever adb-server can connect to one (everywhere but
+// Windows); on Windows it is a loopback TCP port.
 const (
 	reverseForwardPrefix     = "reverse:forward:"
 	reverseNoRebindPrefix    = "norebind:"
 	reverseKillForwardPrefix = "reverse:killforward:"
 	reverseKillForwardAll    = "reverse:killforward-all"
+	reverseListForward       = "reverse:list-forward"
 )
 
 // reverseForward is one active reverse forward of the guest: device
@@ -41,8 +51,61 @@ type reverseForward struct {
 	listener net.Listener
 }
 
-func (f *reverseForward) port() int {
-	return f.listener.Addr().(*net.TCPAddr).Port
+// endpoint returns the socket spec adb-server connects to for the relay.
+func (f *reverseForward) endpoint() string {
+	return relayEndpoint(f.listener)
+}
+
+func relayEndpoint(listener net.Listener) string {
+	if address, ok := listener.Addr().(*net.UnixAddr); ok {
+		return "localfilesystem:" + address.Name
+	}
+	return fmt.Sprintf("tcp:%d", listener.Addr().(*net.TCPAddr).Port)
+}
+
+// privateListener is a Unix socket listener in a directory of its own,
+// which closing it removes.
+type privateListener struct {
+	net.Listener
+	dir string
+}
+
+func (l *privateListener) Close() error {
+	err := l.Listener.Close()
+	_ = os.RemoveAll(l.dir)
+	return err
+}
+
+// listenPrivately opens a Unix socket only this user can connect to.
+func listenPrivately() (net.Listener, error) {
+	if runtime.GOOS == "windows" {
+		return nil, errors.New("adb-server can't connect to Unix sockets on Windows")
+	}
+	// MkdirTemp creates the directory with mode 0700. The socket's path has
+	// to stay short (about 100 bytes at most), hence the short names.
+	dir, err := os.MkdirTemp("", "adb-remote-")
+	if err != nil {
+		return nil, err
+	}
+	listener, err := net.Listen("unix", filepath.Join(dir, "s"))
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	return &privateListener{Listener: listener, dir: dir}, nil
+}
+
+// listenRelay opens a relay endpoint: a private Unix socket where
+// possible, a loopback TCP port otherwise.
+func (m *OwnerMultiplexer) listenRelay() (net.Listener, error) {
+	listener, err := listenPrivately()
+	if err == nil {
+		return listener, nil
+	}
+	if runtime.GOOS != "windows" {
+		m.logger.Warn(fmt.Sprintf("Couldn't open a private relay socket, falling back to a loopback port any local process can reach: %s", err))
+	}
+	return net.Listen("tcp", "127.0.0.1:0")
 }
 
 // openDeviceStream opens service on the local device, translating reverse
@@ -86,25 +149,25 @@ func (m *OwnerMultiplexer) prepareReverseForward(service string) (string, func(o
 	norebind := strings.HasPrefix(spec, reverseNoRebindPrefix)
 	remote, local, ok := strings.Cut(strings.TrimPrefix(spec, reverseNoRebindPrefix), ";")
 	if !ok {
-		// Malformed; let the device reject it.
-		return service, func(bool) {}, nil
+		// checkGuestService refuses these before they get here.
+		return "", nil, fmt.Errorf("malformed reverse forward request %q", service)
 	}
-	rewrite := func(port int) string {
+	rewrite := func(endpoint string) string {
 		prefix := reverseForwardPrefix
 		if norebind {
 			prefix += reverseNoRebindPrefix
 		}
-		return fmt.Sprintf("%s%s;tcp:%d", prefix, remote, port)
+		return fmt.Sprintf("%s%s;%s", prefix, remote, endpoint)
 	}
 
 	m.mu.Lock()
 	existing := m.reverseForwards[remote]
 	m.mu.Unlock()
 	if existing != nil {
-		// The device already sends remote to this relay port; keep it and
-		// only retarget. A norebind request is refused by the device, since
-		// remote is already forwarded there.
-		return rewrite(existing.port()), func(opened bool) {
+		// The device already sends remote to this relay endpoint; keep it
+		// and only retarget. A norebind request is refused by the device,
+		// since remote is already forwarded there.
+		return rewrite(existing.endpoint()), func(opened bool) {
 			if opened && !norebind {
 				m.mu.Lock()
 				existing.local = local
@@ -113,12 +176,12 @@ func (m *OwnerMultiplexer) prepareReverseForward(service string) (string, func(o
 		}, nil
 	}
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := m.listenRelay()
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to open a relay port for the reverse forward: %w", err)
+		return "", nil, fmt.Errorf("failed to open a relay endpoint for the reverse forward: %w", err)
 	}
 	forward := &reverseForward{remote: remote, local: local, listener: listener}
-	return rewrite(forward.port()), func(opened bool) {
+	return rewrite(forward.endpoint()), func(opened bool) {
 		if !opened {
 			_ = listener.Close()
 			return
@@ -126,7 +189,7 @@ func (m *OwnerMultiplexer) prepareReverseForward(service string) (string, func(o
 		m.mu.Lock()
 		m.reverseForwards[remote] = forward
 		m.mu.Unlock()
-		m.logger.Info(fmt.Sprintf("Reverse forward %s -> guest's %s, relayed through 127.0.0.1:%d", remote, local, forward.port()))
+		m.logger.Info(fmt.Sprintf("Reverse forward %s -> guest's %s, relayed through %s", remote, local, forward.endpoint()))
 		go m.acceptReverseConnections(forward)
 	}, nil
 }
@@ -185,8 +248,8 @@ func (m *OwnerMultiplexer) removeReverseForward(remote string) {
 	}
 }
 
-// removeAllReverseForwards closes every relay port and returns the forwards
-// it removed.
+// removeAllReverseForwards closes every relay endpoint and returns the
+// forwards it removed.
 func (m *OwnerMultiplexer) removeAllReverseForwards() []*reverseForward {
 	m.mu.Lock()
 	forwards := make([]*reverseForward, 0, len(m.reverseForwards))
@@ -204,7 +267,7 @@ func (m *OwnerMultiplexer) removeAllReverseForwards() []*reverseForward {
 
 // killReverseForwardOnDevice removes remote's forward from the device, so a
 // later device connection to it can't end up on whatever reuses the relay
-// port.
+// endpoint.
 func (m *OwnerMultiplexer) killReverseForwardOnDevice(remote string) {
 	conn, err := m.smartSocket.OpenStream(m.deviceId, reverseKillForwardPrefix+remote)
 	if err != nil {

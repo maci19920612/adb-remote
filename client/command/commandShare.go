@@ -35,12 +35,14 @@ func CreateShareCommand(
 			// A zero or negative timeout (including the documented -1
 			// sentinel) disables the timer entirely.
 			sessionTimeout := time.Duration(*typedArgs.SessionTimeoutMinutes) * time.Minute
-			return tui.RunShare(context.Background(), client, smartSocket, ownerIdentity, *typedArgs.TargetDevice, *typedArgs.AutoAccept, sessionTimeout)
+			trustedFingerprints := tui.ParseFingerprints(*typedArgs.TrustedFingerprints)
+			return tui.RunShare(context.Background(), client, smartSocket, ownerIdentity, *typedArgs.TargetDevice, *typedArgs.AutoAccept, trustedFingerprints, sessionTimeout)
 		},
 		ParameterFactory: func() (BaseCommand, error) {
 			flagSet := flag.NewFlagSet("share", flag.ExitOnError)
 			targetDevice := flagSet.String("targetDevice", "", "The device ID to share; skips the device picker if set")
-			autoAccept := flagSet.Bool("yes", false, "Automatically accept every room join request instead of prompting")
+			autoAccept := flagSet.Bool("yes", false, "Automatically accept every room join request instead of prompting (anyone who learns the room id gets in)")
+			trustedFingerprints := flagSet.String("trust", "", "Comma-separated guest fingerprints (SHA256:...) to accept automatically; everyone else is still prompted")
 			sessionTimeoutMinutes := flagSet.Int("sessionTimeout", DefaultSessionTimeoutMinutes, "Minutes before the room is automatically closed; -1 disables the timeout")
 			verbosity := RegisterVerbosityFlag(flagSet)
 			getHelp := flagSet.Bool("help", false, "Print this help")
@@ -49,6 +51,7 @@ func CreateShareCommand(
 				GetHelp:               getHelp,
 				TargetDevice:          targetDevice,
 				AutoAccept:            autoAccept,
+				TrustedFingerprints:   trustedFingerprints,
 				SessionTimeoutMinutes: sessionTimeoutMinutes,
 				VerbosityFlag:         verbosity,
 			}, nil
@@ -69,6 +72,7 @@ type commandShareArgs struct {
 	GetHelp               *bool
 	TargetDevice          *string
 	AutoAccept            *bool
+	TrustedFingerprints   *string
 	SessionTimeoutMinutes *int
 	VerbosityFlag         *string
 }

@@ -70,8 +70,8 @@ func registerConnectionManager(container *container.Container) {
 
 func registerRoomManager(container *container.Container) {
 	err := container.Singleton(
-		func(logger *slog.Logger, connectionManager *connectionManager.ConnectionManager) *roomManager.RoomManager {
-			return roomManager.CreateRoomManager(connectionManager, logger)
+		func(logger *slog.Logger, configuration *config.TransporterConfiguration, connectionManager *connectionManager.ConnectionManager) *roomManager.RoomManager {
+			return roomManager.CreateRoomManager(connectionManager, configuration, logger)
 		},
 	)
 	if err != nil {

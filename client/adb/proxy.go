@@ -28,7 +28,8 @@ const deviceFeatures = "shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,fix
 // through Connections for a relay to pump ADB protocol messages over the
 // transporter.
 type IAdbProxy interface {
-	// Start begins listening for local ADB connections, presenting itself
+	// Start begins listening on 127.0.0.1 (never on other interfaces: the
+	// proxy authenticates nobody) for local ADB connections, presenting itself
 	// as a device named after roomId once a CNXN handshake completes.
 	Start(roomId string) error
 	// Stop closes the listener and any pending accept loop. Already
@@ -65,7 +66,7 @@ func (p *AdbProxy) Connections() <-chan net.Conn {
 
 func (p *AdbProxy) Start(roomId string) error {
 	logger := p.logger
-	listener, err := net.Listen("tcp", fmt.Sprintf("0.0.0.0:%s", p.port))
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", p.port))
 	if err != nil {
 		return err
 	}

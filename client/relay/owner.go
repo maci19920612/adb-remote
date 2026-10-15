@@ -174,6 +174,14 @@ func (m *OwnerMultiplexer) handleOpen(guestId uint32, rawService string) {
 	logger := m.logger
 	logger.Info(fmt.Sprintf("Guest opened a stream (id=%d): %s", guestId, service))
 
+	if err := checkGuestService(service); err != nil {
+		logger.Warn(fmt.Sprintf("Refusing the guest's stream (id=%d): %s", guestId, err))
+		if sendErr := m.sendClose(0, guestId); sendErr != nil {
+			logger.Error(fmt.Sprintf("Failed to notify the guest of the refusal: %s", sendErr))
+		}
+		return
+	}
+
 	conn, err := m.openDeviceStream(service)
 	if err != nil {
 		logger.Error(fmt.Sprintf("Failed to open service %q on the local device: %s", service, err))

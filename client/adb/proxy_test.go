@@ -120,3 +120,18 @@ func TestProxyStopClosesListener(t *testing.T) {
 		t.Fatalf("expected dialing a stopped proxy to fail")
 	}
 }
+
+// TestProxyListensOnLoopbackOnly is a regression test for the proxy
+// listening on every interface, which let anyone on the guest's network
+// "adb connect" to the shared device.
+func TestProxyListensOnLoopbackOnly(t *testing.T) {
+	proxy := startTestProxy(t, freeLocalPort(t), "ROOM42")
+
+	address, ok := proxy.listener.Addr().(*net.TCPAddr)
+	if !ok {
+		t.Fatalf("expected a TCP listener, got %T", proxy.listener.Addr())
+	}
+	if !address.IP.IsLoopback() {
+		t.Fatalf("expected the proxy to listen on loopback only, got %s", address)
+	}
+}
